@@ -24,6 +24,19 @@ const CHROME_EXE = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 ].find(p => fs.existsSync(p));
 
+const CLAUDE_EXE = (() => {
+    // Cauta in extensia VSCode
+    const extDir = path.join(os.homedir(), '.vscode', 'extensions');
+    if (fs.existsSync(extDir)) {
+        const dirs = fs.readdirSync(extDir).filter(d => d.startsWith('anthropic.claude-code'));
+        for (const d of dirs.sort().reverse()) {
+            const exe = path.join(extDir, d, 'resources', 'native-binary', 'claude.exe');
+            if (fs.existsSync(exe)) return exe;
+        }
+    }
+    return 'claude'; // fallback
+})();
+
 function loadMeta() {
     try { return JSON.parse(fs.readFileSync(ACCOUNT_META, 'utf8')); } catch { return {}; }
 }
@@ -59,52 +72,85 @@ async function loginViaMagicLink(page, email) {
     console.log('Email trimis, astept magic link in iCloud...');
 }
 
-async function getMagicLinkFromICloud(browser, emailPrefix) {
+async function getMagicLinkFromICloud(browser, senderEmail) {
     console.log('Deschid iCloud Mail...');
     const mailPage = await browser.newPage();
 
-    await mailPage.goto('https://mail.icloud.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
-    await mailPage.waitForTimeout(3000);
+    await mailPage.goto('https://mail.icloud.com', { waitUntil: 'load', timeout: 30000 });
+    await mailPage.waitForTimeout(5000);
 
-    // Asteapta sa se incarce inbox-ul
-    try {
-        await mailPage.waitForSelector('.mail-message-list, [data-testid="message-list"], .message-list-item', { timeout: 20000 });
-    } catch {
-        console.log('iCloud Mail nu s-a incarcat - poate nu esti logat in iCloud in acest profil Chrome');
+    // Log URL curent pentru debug
+    console.log('iCloud URL:', mailPage.url());
+
+    // Verifica daca e logat (iCloud redirecteaza la appleid daca nu e)
+    if (mailPage.url().includes('appleid.apple.com') || mailPage.url().includes('signin')) {
+        console.log('Nu esti logat in iCloud in acest profil Chrome');
+        await mailPage.close();
         return null;
     }
 
-    // Cauta email de la claude/anthropic (asteapta pana la 60s)
-    for (let i = 0; i < 12; i++) {
-        console.log(`Caut email Claude in iCloud... (${i + 1}/12)`);
-
-        // Refresh inbox
-        await mailPage.keyboard.press('F5').catch(() => {});
+    // Asteapta inbox cu multiple selectori posibili
+    const inboxSelectors = [
+        '.mail-message-list-scroll-view',
+        '[data-test-id="mail-message-list"]',
+        '.message-list',
+        'ul[role="listbox"]',
+        '.email-list'
+    ];
+    let loaded = false;
+    for (const sel of inboxSelectors) {
+        try {
+            await mailPage.waitForSelector(sel, { timeout: 10000 });
+            loaded = true;
+            console.log('Inbox incarcat cu selector:', sel);
+            break;
+        } catch {}
+    }
+    if (!loaded) {
+        // Fa screenshot pentru debug
+        await mailPage.screenshot({ path: 'icloud-debug.png' });
+        console.log('Screenshot salvat: icloud-debug.png - verifica manual');
+        // Asteapta mai mult si incearca oricum
         await mailPage.waitForTimeout(5000);
+    }
 
-        // Cauta in lista de mesaje
-        const messages = await mailPage.$$('[data-testid="message-list-item"], .message-list-item, li[role="option"]');
-        for (const msg of messages) {
-            const text = await msg.innerText().catch(() => '');
-            if (text.toLowerCase().includes('claude') || text.toLowerCase().includes('anthropic') || text.toLowerCase().includes('sign in')) {
-                console.log('Email gasit! Deschid...');
-                await msg.click();
-                await mailPage.waitForTimeout(2000);
+    // Cauta email Claude in inbox (asteapta pana 90s)
+    for (let i = 0; i < 18; i++) {
+        console.log(`Caut email Claude in iCloud... (${i + 1}/18, ${(i+1)*5}s)`);
 
-                // Cauta link-ul magic in email
-                const link = await mailPage.$('a[href*="claude.ai"], a[href*="magic"], a[href*="verify"], a[href*="login"]');
-                if (link) {
-                    const href = await link.getAttribute('href');
-                    console.log('Magic link gasit:', href.substring(0, 60) + '...');
-                    await mailPage.close();
-                    return href;
+        // Obtine toate elementele care ar putea fi emailuri
+        const emailRows = await mailPage.$$('tr, li[role="option"], [role="listitem"], .email-row, .message-row');
+        for (const row of emailRows) {
+            const text = (await row.innerText().catch(() => '')).toLowerCase();
+            if (text.includes('claude') || text.includes('anthropic') || text.includes('sign in') || text.includes('verify')) {
+                console.log('Email potrivit gasit! Click...');
+                await row.click();
+                await mailPage.waitForTimeout(3000);
+
+                // Cauta link-ul in corpul emailului
+                const links = await mailPage.$$('a[href]');
+                for (const link of links) {
+                    const href = await link.getAttribute('href').catch(() => '');
+                    if (href && (href.includes('claude.ai') || href.includes('anthropic.com')) &&
+                        (href.includes('token') || href.includes('verify') || href.includes('login') || href.includes('magic') || href.includes('callback'))) {
+                        console.log('Magic link gasit:', href.substring(0, 70) + '...');
+                        await mailPage.close();
+                        return href;
+                    }
                 }
             }
+        }
+
+        await mailPage.waitForTimeout(5000);
+        // Apasa refresh dupa 30s
+        if (i > 0 && i % 6 === 0) {
+            await mailPage.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            await mailPage.waitForTimeout(3000);
         }
     }
 
     await mailPage.close();
-    console.log('Nu s-a gasit email de la Claude in 60s');
+    console.log('Nu s-a gasit email de la Claude in 90s');
     return null;
 }
 
@@ -125,9 +171,18 @@ async function run() {
 
     // Porneste claude login si captureaza URL-ul OAuth
     console.log('Pornesc claude login...');
-    const claudeLogin = spawn('claude', ['login'], {
+    // Sterge credentials expirate ca sa fortam login flow
+    if (fs.existsSync(CREDS_FILE)) {
+        fs.renameSync(CREDS_FILE, CREDS_FILE + '.bak');
+        console.log('Credentials vechi salvate ca backup');
+    }
+
+    console.log('Claude exe:', CLAUDE_EXE);
+    const loginArgs = ['auth', 'login'];
+    if (email) loginArgs.push('--email', email);
+    const claudeLogin = spawn(CLAUDE_EXE, loginArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: true
+        shell: false
     });
 
     let oauthUrl = null;
@@ -163,46 +218,49 @@ async function run() {
 
     const page = await browser.newPage();
 
-    // Verifica daca e logat pe claude.ai
-    const loggedIn = await isLoggedInClaude(page);
-    console.log('Logat pe claude.ai:', loggedIn);
+    // Mergi direct la URL-ul OAuth
+    console.log('Navighez la URL OAuth...');
+    await page.goto(oauthUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.waitForTimeout(2000);
 
-    if (!loggedIn && email) {
-        // Logheaza via magic link
+    const currentUrl = page.url();
+    console.log('URL curent:', currentUrl);
+
+    // Daca e redirectat la login, trebuie sa ne logam
+    const needsLogin = currentUrl.includes('/login') || currentUrl.includes('/onboarding') ||
+                       await page.$('input[type="email"]') !== null;
+
+    if (needsLogin && email) {
+        console.log('Necesita login, trimit magic link...');
         await loginViaMagicLink(page, email);
-
-        // Ia magic link din iCloud
         const magicLink = await getMagicLinkFromICloud(browser, email);
         if (magicLink) {
             await page.goto(magicLink, { waitUntil: 'domcontentloaded', timeout: 15000 });
             await page.waitForTimeout(3000);
-            console.log('Magic link accesat, logat!');
-            if (email) { meta.email = email; saveMeta(meta); }
+            console.log('Logat via magic link!');
+            // Mergi din nou la OAuth URL dupa login
+            await page.goto(oauthUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.waitForTimeout(2000);
         } else {
-            console.log('Nu s-a putut obtine magic link automat');
+            console.log('Magic link neobtintinut - verificare manuala necesara');
             await browser.close();
             claudeLogin.kill();
             process.exit(1);
         }
-    } else if (!loggedIn) {
-        console.error('Nu esti logat si nu am email pentru login automat.');
-        console.error('Ruleaza cu: node auto-login.js <profile> <cont> <email@icloud.com>');
+    } else if (needsLogin) {
+        console.error('Necesita login dar nu am email. Ruleaza: node auto-login.js <profile> <cont> <email>');
         await browser.close();
         claudeLogin.kill();
         process.exit(1);
     }
 
-    // Acum mergi la URL-ul OAuth
-    await page.goto(oauthUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-    await page.waitForTimeout(2000);
-
     // Click Authorize
     try {
-        await page.waitForSelector('button:has-text("Authorize"), button:has-text("Allow"), button:has-text("Continue")', { timeout: 10000 });
+        await page.waitForSelector('button:has-text("Authorize"), button:has-text("Allow"), button:has-text("Continue")', { timeout: 15000 });
         await page.click('button:has-text("Authorize"), button:has-text("Allow"), button:has-text("Continue")');
         console.log('Authorize efectuat!');
-    } catch {
-        console.log('Buton Authorize negasit - poate deja autorizat');
+    } catch (e) {
+        console.log('Buton Authorize negasit:', e.message);
     }
 
     // Asteapta claude login sa termine
@@ -226,10 +284,17 @@ async function run() {
         console.log(`Token: ${creds.claudeAiOauth.accessToken.substring(0, 25)}...`);
         console.log(`Expira: ${exp.toLocaleString()}`);
     } else {
+        // Restaureaza backup daca login a esuat
+        if (fs.existsSync(CREDS_FILE + '.bak')) {
+            fs.renameSync(CREDS_FILE + '.bak', CREDS_FILE);
+            console.log('Backup restaurat (login esuat)');
+        }
         console.error('Credentialele nu au fost salvate');
         process.exit(1);
     }
 
+    // Sterge backup dupa succes
+    if (fs.existsSync(CREDS_FILE + '.bak')) fs.unlinkSync(CREDS_FILE + '.bak');
     claudeLogin.kill();
 }
 
