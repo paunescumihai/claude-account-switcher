@@ -203,6 +203,19 @@ function Update-VSCodeTitle($name) {
     } catch {}
 }
 
+function Launch-Widget {
+    $widgetDir = "$env:USERPROFILE\claude-usage-widget-app"
+    $nodeExe   = "C:\Program Files\nodejs\node.exe"
+    if (-not (Test-Path $widgetDir)) {
+        Write-Color "  Widget nu e instalat la $widgetDir" Red
+        return
+    }
+    $existing = Get-Process -Name "electron*" -ErrorAction SilentlyContinue
+    if ($existing) { $existing | Stop-Process -Force -ErrorAction SilentlyContinue }
+    Start-Process $nodeExe -ArgumentList "$widgetDir\node_modules\.bin\electron $widgetDir" -WindowStyle Hidden
+    Write-Color "  Widget lansat!" Green
+}
+
 function Switch-Account($name) {
     $src = "$ACCOUNTS_DIR\$name.json"
     if (-not (Test-Path $src)) {
@@ -212,6 +225,7 @@ function Switch-Account($name) {
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
     Update-VSCodeTitle $name
+    Launch-Widget
     Write-Color "  CLI switched la: $name" Green
 
     $profileDir = Get-AccountProfile $name
@@ -346,6 +360,7 @@ while ($true) {
     Write-Color "  [S] Switch cont (CLI + deschide profilul Chrome)" White
     Write-Color "  [N] Auto-switch la urmatorul cont" White
     Write-Color "  [D] Sterge un cont" White
+    Write-Color "  [W] Lanseaza Usage Widget" White
     Write-Color "  [I] Instaleaza hook auto-switch (la rate limit)" White
     Write-Color "  [U] Dezinstaleaza hook" White
     Write-Color "  [Q] Iesire" White
@@ -358,6 +373,7 @@ while ($true) {
         "S" { Switch-AccountMenu }
         "N" { Auto-SwitchNext; Start-Sleep 1 }
         "D" { Delete-Account }
+        "W" { Launch-Widget; Start-Sleep 1 }
         "I" { Install-Hook }
         "U" { Uninstall-Hook }
         "Q" { exit }
