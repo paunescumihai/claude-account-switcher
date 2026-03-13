@@ -18,7 +18,7 @@ const CHROME_EXE      = [
 ].find(p => fs.existsSync(p));
 const CHROME_USER_DATA = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
 
-function createChromeProfile(profileName) {
+function createChromeProfile(profileName, email = '') {
     // Gaseste urmatorul director disponibil (Profile 1, Profile 2, ...)
     let dirName = 'Profile 1';
     let n = 1;
@@ -36,7 +36,7 @@ function createChromeProfile(profileName) {
         profile: {
             name: profileName,
             is_using_default_name: false,
-            user_name: ''
+            user_name: email
         }
     };
     fs.writeFileSync(
@@ -53,7 +53,7 @@ function createChromeProfile(profileName) {
         ls.profile.info_cache[dirName] = {
             name: profileName,
             is_using_default_name: false,
-            user_name: '',
+            user_name: email,
             active_time: Date.now() / 1000
         };
         fs.writeFileSync(LOCAL_STATE, JSON.stringify(ls), 'utf8');
@@ -145,7 +145,7 @@ async function addAccount() {
     });
     if (!name) return;
 
-    const profiles = getChromeProfiles();
+    let profiles = getChromeProfiles();
     let profileDir = null;
 
     if (profiles.length > 0) {
@@ -171,13 +171,18 @@ async function addAccount() {
             }
             if (picked.dir === '__new__') {
                 const newName = await vscode.window.showInputBox({
-                    title: 'Profil Chrome nou',
-                    prompt: 'Numele profilului (ex: claude cristi)',
+                    title: 'Profil Chrome nou — Nume',
+                    prompt: 'Numele profilului (ex: claude cos)',
                     ignoreFocusOut: true
                 });
                 if (!newName) continue;
-                const newDir = createChromeProfile(newName);
-                vscode.window.showInformationMessage(`Profil "${newName}" creat (${newDir})`);
+                const newEmail = await vscode.window.showInputBox({
+                    title: 'Profil Chrome nou — Email',
+                    prompt: 'Email-ul contului (ex: cos@powerhost.ro)',
+                    ignoreFocusOut: true
+                });
+                const newDir = createChromeProfile(newName, newEmail || '');
+                vscode.window.showInformationMessage(`Profil "${newName}"${newEmail ? ` (${newEmail})` : ''} creat (${newDir})`);
                 profiles = getChromeProfiles();
                 continue;
             }
