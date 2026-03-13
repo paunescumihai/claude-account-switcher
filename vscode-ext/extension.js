@@ -4,12 +4,15 @@ const path = require('path');
 const os = require('os');
 const { exec } = require('child_process');
 
-const ACCOUNTS_DIR = path.join(os.homedir(), '.claude', 'accounts');
-const ACTIVE_FILE  = path.join(ACCOUNTS_DIR, '.active');
-const CREDS_FILE   = path.join(os.homedir(), '.claude', '.credentials.json');
-const VS_SETTINGS  = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'settings.json');
-const LOCAL_STATE  = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Local State');
-const CHROME_EXE   = [
+const ACCOUNTS_DIR  = path.join(os.homedir(), '.claude', 'accounts');
+const ACTIVE_FILE   = path.join(ACCOUNTS_DIR, '.active');
+const CREDS_FILE    = path.join(os.homedir(), '.claude', '.credentials.json');
+const VS_SETTINGS   = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'settings.json');
+const LOCAL_STATE   = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data', 'Local State');
+const WIDGET_STORE  = path.join(os.homedir(), 'AppData', 'Roaming', 'claude-usage-widget', 'config.json');
+const WIDGET_DIR    = path.join(os.homedir(), 'claude-usage-widget-app');
+const ELECTRON_EXE  = path.join(WIDGET_DIR, 'node_modules', '.bin', 'electron.cmd');
+const CHROME_EXE    = [
     path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 ].find(p => fs.existsSync(p));
@@ -57,6 +60,24 @@ function updateVSCodeTitle(name) {
 function openChrome(profileDir) {
     if (!CHROME_EXE) return;
     exec(`"${CHROME_EXE}" "--profile-directory=${profileDir}" https://claude.ai`);
+}
+
+function restoreWidgetSession(name) {
+    const saved = path.join(ACCOUNTS_DIR, `${name}.widget.json`);
+    if (!fs.existsSync(saved)) return false;
+    try {
+        const dir = path.dirname(WIDGET_STORE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(saved, WIDGET_STORE);
+        return true;
+    } catch { return false; }
+}
+
+function launchWidget() {
+    if (!fs.existsSync(ELECTRON_EXE)) return;
+    exec(`taskkill /IM electron.exe /F`, () => {
+        setTimeout(() => exec(`"${ELECTRON_EXE}" "${WIDGET_DIR}"`), 800);
+    });
 }
 
 async function addAccount() {
@@ -159,6 +180,8 @@ async function showMenu() {
         fs.writeFileSync(ACTIVE_FILE, picked.name, 'utf8');
         updateVSCodeTitle(picked.name);
         updateStatusBar();
+        restoreWidgetSession(picked.name);
+        launchWidget();
 
         const profileFile = path.join(ACCOUNTS_DIR, `${picked.name}.profile`);
         if (fs.existsSync(profileFile)) {

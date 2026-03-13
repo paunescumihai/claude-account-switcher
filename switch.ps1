@@ -180,6 +180,7 @@ function Save-CurrentAccount {
         Copy-Item $CREDS_FILE "$ACCOUNTS_DIR\$name.json" -Force
         if ($profileDir) { Set-AccountProfile $name $profileDir }
         Set-ActiveAccount $name
+        Save-WidgetSession $name
         Write-Color "  Cont '$name' salvat!" Green
     } else {
         Write-Color "  ATENTIE: Nu s-a gasit fisier CLI. Fa 'claude' login in terminal." DarkYellow
@@ -203,16 +204,36 @@ function Update-VSCodeTitle($name) {
     } catch {}
 }
 
+$WIDGET_STORE = "$env:APPDATA\claude-usage-widget\config.json"
+$ELECTRON_EXE = "$env:USERPROFILE\claude-usage-widget-app\node_modules\.bin\electron.cmd"
+
+function Save-WidgetSession($name) {
+    if (Test-Path $WIDGET_STORE) {
+        Copy-Item $WIDGET_STORE "$ACCOUNTS_DIR\$name.widget.json" -Force
+        Write-Color "  Sesiune widget salvata pentru '$name'" Green
+    }
+}
+
+function Restore-WidgetSession($name) {
+    $saved = "$ACCOUNTS_DIR\$name.widget.json"
+    if (Test-Path $saved) {
+        $dir = Split-Path $WIDGET_STORE
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Copy-Item $saved $WIDGET_STORE -Force
+        return $true
+    }
+    return $false
+}
+
 function Launch-Widget {
     $widgetDir = "$env:USERPROFILE\claude-usage-widget-app"
-    $nodeExe   = "C:\Program Files\nodejs\node.exe"
     if (-not (Test-Path $widgetDir)) {
         Write-Color "  Widget nu e instalat la $widgetDir" Red
         return
     }
-    $existing = Get-Process -Name "electron*" -ErrorAction SilentlyContinue
-    if ($existing) { $existing | Stop-Process -Force -ErrorAction SilentlyContinue }
-    Start-Process $nodeExe -ArgumentList "$widgetDir\node_modules\.bin\electron $widgetDir" -WindowStyle Hidden
+    Get-Process -Name "electron*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    Start-Process $ELECTRON_EXE -ArgumentList $widgetDir -WindowStyle Normal
     Write-Color "  Widget lansat!" Green
 }
 
@@ -225,7 +246,9 @@ function Switch-Account($name) {
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
     Update-VSCodeTitle $name
+    $restored = Restore-WidgetSession $name
     Launch-Widget
+    if (-not $restored) { Write-Color "  (Widgetul va cere login pentru acest cont)" DarkGray }
     Write-Color "  CLI switched la: $name" Green
 
     $profileDir = Get-AccountProfile $name
