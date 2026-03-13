@@ -1,4 +1,6 @@
 # install.ps1 — Creeaza shortcut-ul pe desktop dupa clonarea repo-ului
+# Folosire: git clone https://github.com/paunescumihai/claude-account-switcher "%USERPROFILE%\claude-account-switcher"
+#           powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\claude-account-switcher\install.ps1"
 
 $repoDir  = $PSScriptRoot
 $iconPath = "$repoDir\icon.ico"
