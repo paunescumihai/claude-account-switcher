@@ -253,12 +253,22 @@ function Launch-Widget {
     Write-Color "  Widget lansat!" Green
 }
 
+$REFRESH_PY = "$PSScriptRoot\refresh-token.py"
+
+function Refresh-AccountToken($name) {
+    $src = "$ACCOUNTS_DIR\$name.json"
+    if ((Test-Path $PYTHON_EXE) -and (Test-Path $REFRESH_PY)) {
+        & $PYTHON_EXE $REFRESH_PY $src 2>&1 | ForEach-Object { Write-Color "  $_" DarkGray }
+    }
+}
+
 function Switch-Account($name) {
     $src = "$ACCOUNTS_DIR\$name.json"
     if (-not (Test-Path $src)) {
         Write-Color "  EROARE: Contul '$name' nu exista." Red
         return $false
     }
+    Refresh-AccountToken $name
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
     Update-VSCodeTitle $name

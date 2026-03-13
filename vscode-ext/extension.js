@@ -185,8 +185,14 @@ async function showMenu() {
 
     if (picked.name === active) return;
 
+    const REFRESH_PY = path.join(os.homedir(), 'claude-account-switcher', 'refresh-token.py');
     const src = path.join(ACCOUNTS_DIR, `${picked.name}.json`);
     try {
+        // Refresh token inainte de switch
+        if (fs.existsSync(PYTHON_EXE) && fs.existsSync(REFRESH_PY)) {
+            const { execSync } = require('child_process');
+            try { execSync(`"${PYTHON_EXE}" "${REFRESH_PY}" "${src}"`, { timeout: 15000 }); } catch {}
+        }
         fs.copyFileSync(src, CREDS_FILE);
         fs.writeFileSync(ACTIVE_FILE, picked.name, 'utf8');
         updateVSCodeTitle(picked.name);
