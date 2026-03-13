@@ -78,21 +78,41 @@ function List-Accounts {
 
 function Save-CurrentAccount {
     Show-Banner
-    Write-Color "  Salveaza contul curent logat" Yellow
+    Write-Color "  Adauga cont nou" Yellow
+    Write-Host ""
+
+    $name = Read-Host "  Numele contului (ex: paunescu@powerhost.ro)"
+    if ([string]::IsNullOrWhiteSpace($name)) { return }
+
+    # Deschide Chrome la claude.ai
+    Write-Host ""
+    Write-Color "  Deschid Chrome la claude.ai..." Cyan
+    $chrome = @(
+        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+        "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
+        "$env:PROGRAMFILES(x86)\Google\Chrome\Application\chrome.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if ($chrome) {
+        Start-Process $chrome "https://claude.ai"
+    } else {
+        Start-Process "https://claude.ai"
+    }
+
+    Write-Host ""
+    Write-Color "  1. Logheaza-te pe claude.ai cu contul '$name'" Yellow
+    Write-Color "  2. Click pe extensia Claude Account Switcher" Yellow
+    Write-Color "  3. Click '+ Salveaza cont curent' si foloseste numele: $name" Yellow
     Write-Host ""
 
     if (-not (Test-Path $CREDS_FILE)) {
-        Write-Color "  EROARE: Nu exista fisier de credentiale. Fa login cu 'claude' intai." Red
-        Read-Host "  Apasa Enter..."
-        return
+        Write-Color "  ATENTIE: Fa si 'claude' login in terminal pentru CLI." DarkYellow
+    } else {
+        Read-Host "  Apasa Enter dupa ce ai salvat in extensie pentru a salva si CLI-ul"
+        Copy-Item $CREDS_FILE "$ACCOUNTS_DIR\$name.json" -Force
+        Set-ActiveAccount $name
+        Write-Color "  CLI salvat pentru '$name'!" Green
     }
-
-    $name = Read-Host "  Numele contului (ex: personal, work, cont2)"
-    if ([string]::IsNullOrWhiteSpace($name)) { return }
-
-    Copy-Item $CREDS_FILE "$ACCOUNTS_DIR\$name.json" -Force
-    Set-ActiveAccount $name
-    Write-Color "  Cont '$name' salvat!" Green
     Start-Sleep 1
 }
 
