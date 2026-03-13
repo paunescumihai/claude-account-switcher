@@ -253,7 +253,39 @@ function Launch-Widget {
     Write-Color "  Widget lansat!" Green
 }
 
-$REFRESH_PY = "$PSScriptRoot\refresh-token.py"
+$REFRESH_PY    = "$PSScriptRoot\refresh-token.py"
+$AUTO_LOGIN_JS = "$PSScriptRoot\auto-login.js"
+$NODE_EXE      = "C:\Program Files\nodejs\node.exe"
+
+function Auto-Login($name) {
+    $profDir = Get-AccountProfile $name
+    if (-not $profDir) {
+        $profDir = Pick-ChromeProfile
+        if ($profDir) { Set-AccountProfile $name $profDir }
+    }
+    if (-not $profDir) { Write-Color "  Niciun profil Chrome selectat." Red; return }
+    if (-not (Test-Path $NODE_EXE)) { Write-Color "  Node.js nu e instalat." Red; return }
+
+    Write-Color "  Pornesc auto-login pentru '$name' (profil: $profDir)..." Cyan
+    & $NODE_EXE $AUTO_LOGIN_JS $profDir $name
+
+    # Test dupa login
+    if (Test-Path "$ACCOUNTS_DIR\$name.json") {
+        Write-Color "  Credentiale salvate!" Green
+        Write-Color "  Testez conexiunea..." Cyan
+        $result = & $NODE_EXE -e "
+            const fs = require('fs');
+            const creds = JSON.parse(fs.readFileSync('$ACCOUNTS_DIR\\$name.json'.replace(/\\/g,'/')));
+            const token = creds.claudeAiOauth.accessToken;
+            const exp = new Date(creds.claudeAiOauth.expiresAt);
+            console.log('Token: ' + token.substring(0,25) + '...');
+            console.log('Expira: ' + exp.toLocaleString());
+        " 2>&1
+        $result | ForEach-Object { Write-Color "  $_" Green }
+    } else {
+        Write-Color "  EROARE: Login esuat. Incearca manual: claude login" Red
+    }
+}
 
 function Refresh-AccountToken($name) {
     $src = "$ACCOUNTS_DIR\$name.json"
@@ -406,6 +438,7 @@ while ($true) {
 
     Write-Color "  Optiuni:" White
     Write-Color "  [A] Adauga cont nou" White
+    Write-Color "  [L] Auto-Login (Chrome + Playwright)" Cyan
     Write-Color "  [S] Switch cont (CLI + deschide profilul Chrome)" White
     Write-Color "  [N] Auto-switch la urmatorul cont" White
     Write-Color "  [D] Sterge un cont" White
@@ -419,6 +452,11 @@ while ($true) {
 
     switch ($opt.ToUpper()) {
         "A" { Save-CurrentAccount }
+        "L" {
+            $n = Read-Host "  Numele contului pentru auto-login"
+            if ($n) { Auto-Login $n }
+            Start-Sleep 2
+        }
         "S" { Switch-AccountMenu }
         "N" { Auto-SwitchNext; Start-Sleep 1 }
         "D" { Delete-Account }
