@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "Claude Account Switcher",
+  "version": "1.0",
+  "description": "Switch between Claude.ai accounts instantly",
+  "permissions": ["cookies", "storage", "tabs"],
+  "host_permissions": ["https://claude.ai/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Claude Account Switcher"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {
+    "16":  "icon.png",
+    "48":  "icon.png",
+    "128": "icon.png"
+  }
+}

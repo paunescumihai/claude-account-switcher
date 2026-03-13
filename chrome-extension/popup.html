@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      width: 300px;
+      padding: 16px;
+    }
+    h2 {
+      font-size: 14px;
+      color: #cc785c;
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    #accounts-list { margin-bottom: 12px; }
+    .account-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      margin-bottom: 6px;
+      background: #1a1a1a;
+      border-radius: 6px;
+      border: 1px solid #2a2a2a;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .account-row:hover { background: #222; }
+    .account-row.active {
+      border-color: #cc785c;
+      background: #1e1510;
+    }
+    .account-name { font-size: 13px; }
+    .account-badge {
+      font-size: 10px;
+      color: #cc785c;
+      background: #2a1a10;
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .account-actions { display: flex; gap: 6px; }
+    .btn-small {
+      font-size: 11px;
+      padding: 3px 8px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background: #2a2a2a;
+      color: #aaa;
+    }
+    .btn-small:hover { background: #333; color: #fff; }
+    .btn-small.danger:hover { background: #4a1a1a; color: #ff6b6b; }
+    .divider { border: none; border-top: 1px solid #2a2a2a; margin: 12px 0; }
+    .actions { display: flex; gap: 8px; }
+    .btn {
+      flex: 1;
+      padding: 8px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .btn-primary { background: #cc785c; color: #fff; }
+    .btn-primary:hover { background: #d4886c; }
+    .btn-secondary { background: #2a2a2a; color: #ccc; }
+    .btn-secondary:hover { background: #333; }
+    #save-input {
+      display: none;
+      margin-top: 10px;
+    }
+    #save-input input {
+      width: 100%;
+      padding: 7px 10px;
+      background: #1a1a1a;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+    #status {
+      font-size: 11px;
+      color: #888;
+      margin-top: 8px;
+      min-height: 16px;
+      text-align: center;
+    }
+    #status.ok { color: #6bcb77; }
+    #status.err { color: #ff6b6b; }
+    .empty { color: #555; font-size: 12px; text-align: center; padding: 12px 0; }
+  </style>
+</head>
+<body>
+  <h2>Claude Account Switcher</h2>
+
+  <div id="accounts-list">
+    <div class="empty">Se incarca...</div>
+  </div>
+
+  <hr class="divider">
+
+  <div class="actions">
+    <button class="btn btn-primary" id="btn-save">+ Salveaza cont curent</button>
+    <button class="btn btn-secondary" id="btn-open">Deschide Claude</button>
+  </div>
+
+  <div id="save-input">
+    <input type="text" id="account-name" placeholder="Nume cont (ex: paunescu@powerhost.ro)">
+    <button class="btn btn-primary" id="btn-confirm-save">Salveaza</button>
+  </div>
+
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
