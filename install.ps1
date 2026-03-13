@@ -4,23 +4,9 @@
 #   powershell -ExecutionPolicy Bypass -File "%USERPROFILE%\claude-account-switcher\install.ps1"
 
 $repoDir  = $PSScriptRoot
-$iconPath = "$repoDir\icon.ico"
 $vsix     = "$repoDir\vscode-ext\claude-account-switcher-1.0.0.vsix"
-$lnkPath  = "$env:USERPROFILE\Desktop\ClaudeSwitch.lnk"
 
-# 1. Shortcut pe desktop
-$shell = New-Object -ComObject WScript.Shell
-$lnk = $shell.CreateShortcut($lnkPath)
-$lnk.TargetPath       = "powershell.exe"
-$lnk.Arguments        = "-NoExit -ExecutionPolicy Bypass -File `"$repoDir\switch.ps1`""
-$lnk.WorkingDirectory = $repoDir
-$lnk.WindowStyle      = 1
-$lnk.IconLocation     = $iconPath
-$lnk.Description      = "Claude Account Switcher"
-$lnk.Save()
-Write-Host "✓ Shortcut creat pe desktop: ClaudeSwitch" -ForegroundColor Green
-
-# 2. Instaleaza extensia VSCode
+# 1. Instaleaza extensia VSCode
 $codeCli = @(
     "$env:LOCALAPPDATA\Programs\Microsoft VS Code\bin\code.cmd",
     "$env:PROGRAMFILES\Microsoft VS Code\bin\code.cmd"
@@ -44,4 +30,4 @@ if (-not (Test-Path $accountsDir)) {
 Write-Host ""
 Write-Host "Setup complet! Pasi urmatori:" -ForegroundColor Cyan
 Write-Host "  1. Restart VSCode" -ForegroundColor White
-Write-Host "  2. Deschide ClaudeSwitch de pe desktop si adauga conturile" -ForegroundColor White
+Write-Host "  2. Click pe iconita din status bar (jos-dreapta) pentru a adauga conturi" -ForegroundColor White

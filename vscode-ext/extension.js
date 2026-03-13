@@ -143,7 +143,7 @@ async function addAccount() {
         prompt: 'Numele contului (ex: paunescu@powerhost.ro)',
         ignoreFocusOut: true
     });
-    if (!name) return;
+    if (!name) { showMenu(); return; }
 
     let profiles = getChromeProfiles();
     let profileDir = null;
@@ -151,6 +151,8 @@ async function addAccount() {
     if (profiles.length > 0) {
         while (true) {
             const items = [
+                { label: '$(arrow-left) Inapoi la meniu', dir: '__back__' },
+                { label: '', kind: vscode.QuickPickItemKind.Separator },
                 ...profiles.map(p => ({
                     label: p.name,
                     description: p.email,
@@ -164,7 +166,7 @@ async function addAccount() {
                 title: 'Alege profilul Chrome pentru acest cont',
                 ignoreFocusOut: true
             });
-            if (!picked) break;
+            if (!picked || picked.dir === '__back__') { showMenu(); return; }
             if (picked.dir === '__refresh__') {
                 profiles = getChromeProfiles();
                 continue;
@@ -252,10 +254,14 @@ async function showMenu() {
             return;
         }
         const toDelete = await vscode.window.showQuickPick(
-            accounts.map(name => ({ label: `$(account) ${name}`, name })),
+            [
+                { label: '$(arrow-left) Inapoi la meniu', name: '__back__' },
+                { label: '', kind: vscode.QuickPickItemKind.Separator },
+                ...accounts.map(name => ({ label: `$(account) ${name}`, name }))
+            ],
             { title: 'Sterge cont', placeHolder: 'Alege contul de sters', ignoreFocusOut: true }
         );
-        if (!toDelete) return;
+        if (!toDelete || toDelete.name === '__back__') { showMenu(); return; }
         const confirm = await vscode.window.showWarningMessage(
             `Stergi contul "${toDelete.name}"? Aceasta actiune nu poate fi anulata.`,
             { modal: true }, 'Sterge'
