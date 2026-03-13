@@ -25,22 +25,21 @@ function Show-Banner {
 }
 
 function Get-ChromeProfiles {
-    $ud = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+    $localState = "$env:LOCALAPPDATA\Google\Chrome\User Data\Local State"
     $profiles = @()
-    foreach ($dir in @("Default", "Profile 1", "Profile 2", "Profile 3", "Profile 4", "Profile 5")) {
-        $pref = "$ud\$dir\Preferences"
-        if (Test-Path $pref) {
-            try {
-                $data = Get-Content $pref -Raw | ConvertFrom-Json
-                $pname = $data.profile.name
-                $email = ""
-                if ($data.account_info -and $data.account_info.Count -gt 0) {
-                    $email = $data.account_info[0].email
-                }
-                $profiles += [PSCustomObject]@{ Dir = $dir; Name = $pname; Email = $email }
-            } catch {}
+    if (-not (Test-Path $localState)) { return $profiles }
+    try {
+        $data = Get-Content $localState -Raw | ConvertFrom-Json
+        $cache = $data.profile.info_cache
+        foreach ($dir in ($cache | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name)) {
+            $info = $cache.$dir
+            $profiles += [PSCustomObject]@{
+                Dir   = $dir
+                Name  = $info.name
+                Email = $info.user_name
+            }
         }
-    }
+    } catch {}
     return $profiles
 }
 
