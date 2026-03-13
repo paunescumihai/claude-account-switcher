@@ -2,6 +2,11 @@
 
 $CREDS_FILE   = "$env:USERPROFILE\.claude\.credentials.json"
 $ACCOUNTS_DIR = "$env:USERPROFILE\.claude\accounts"
+$CHROME_EXE   = @(
+    "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
+    "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
+    "${env:PROGRAMFILES(x86)}\Google\Chrome\Application\chrome.exe"
+) | Where-Object { Test-Path $_ } | Select-Object -First 1
 
 if (-not (Test-Path $ACCOUNTS_DIR)) {
     New-Item -ItemType Directory -Path $ACCOUNTS_DIR -Force | Out-Null
@@ -17,6 +22,36 @@ function Show-Banner {
     Write-Color "      CLAUDE ACCOUNT SWITCHER         " Cyan
     Write-Color "======================================" Cyan
     Write-Host ""
+}
+
+function Get-ChromeProfiles {
+    $ud = "$env:LOCALAPPDATA\Google\Chrome\User Data"
+    $profiles = @()
+    foreach ($dir in @("Default", "Profile 1", "Profile 2", "Profile 3", "Profile 4", "Profile 5")) {
+        $pref = "$ud\$dir\Preferences"
+        if (Test-Path $pref) {
+            try {
+                $data = Get-Content $pref -Raw | ConvertFrom-Json
+                $pname = $data.profile.name
+                $email = ""
+                if ($data.account_info -and $data.account_info.Count -gt 0) {
+                    $email = $data.account_info[0].email
+                }
+                $profiles += [PSCustomObject]@{ Dir = $dir; Name = $pname; Email = $email }
+            } catch {}
+        }
+    }
+    return $profiles
+}
+
+function Get-AccountProfile($name) {
+    $f = "$ACCOUNTS_DIR\$name.profile"
+    if (Test-Path $f) { return Get-Content $f }
+    return $null
+}
+
+function Set-AccountProfile($name, $profileDir) {
+    Set-Content -Path "$ACCOUNTS_DIR\$name.profile" -Value $profileDir
 }
 
 function Get-Accounts {
@@ -63,6 +98,8 @@ function List-Accounts {
     foreach ($acc in $accounts) {
         $name = $acc.BaseName
         $info = Get-AccountInfo $acc.FullName
+        $prof = Get-AccountProfile $name
+        $profLabel = if ($prof) { " | Chrome: $prof" } else { "" }
         $marker = ""
         $color = "White"
         if ($name -eq $active) {
@@ -70,10 +107,48 @@ function List-Accounts {
             $color = "Green"
         }
         Write-Color "  [$i] $name$marker" $color
-        Write-Color "      $info" DarkGray
+        Write-Color "      $info$profLabel" DarkGray
         $i++
     }
     Write-Host ""
+}
+
+function Pick-ChromeProfile {
+    $profiles = Get-ChromeProfiles
+    if ($profiles.Count -eq 0) {
+        Write-Color "  Nu s-au gasit profiluri Chrome." Red
+        return $null
+    }
+
+    Write-Host ""
+    Write-Color "  Profiluri Chrome disponibile:" White
+    $i = 1
+    foreach ($p in $profiles) {
+        $label = $p.Name
+        if ($p.Email) { $label += " ($($p.Email))" }
+        Write-Color "  [$i] $($p.Dir) - $label" White
+        $i++
+    }
+    Write-Host ""
+
+    $choice = Read-Host "  Alege profilul Chrome pentru acest cont"
+    if ([string]::IsNullOrWhiteSpace($choice)) { return $null }
+
+    $idx = [int]$choice - 1
+    if ($idx -lt 0 -or $idx -ge $profiles.Count) { return $null }
+    return $profiles[$idx].Dir
+}
+
+function Open-ChromeProfile($profileDir) {
+    if (-not $CHROME_EXE) {
+        Start-Process "https://claude.ai"
+        return
+    }
+    if ($profileDir) {
+        Start-Process $CHROME_EXE "--profile-directory=`"$profileDir`" https://claude.ai"
+    } else {
+        Start-Process $CHROME_EXE "https://claude.ai"
+    }
 }
 
 function Save-CurrentAccount {
@@ -84,20 +159,11 @@ function Save-CurrentAccount {
     $name = Read-Host "  Numele contului (ex: paunescu@powerhost.ro)"
     if ([string]::IsNullOrWhiteSpace($name)) { return }
 
-    # Deschide Chrome la claude.ai
-    Write-Host ""
-    Write-Color "  Deschid Chrome la claude.ai..." Cyan
-    $chrome = @(
-        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe",
-        "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe",
-        "$env:PROGRAMFILES(x86)\Google\Chrome\Application\chrome.exe"
-    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    $profileDir = Pick-ChromeProfile
 
-    if ($chrome) {
-        Start-Process $chrome "https://claude.ai"
-    } else {
-        Start-Process "https://claude.ai"
-    }
+    Write-Host ""
+    Write-Color "  Deschid Chrome..." Cyan
+    Open-ChromeProfile $profileDir
 
     Write-Host ""
     Write-Color "  1. Logheaza-te pe claude.ai cu contul '$name'" Yellow
@@ -105,13 +171,15 @@ function Save-CurrentAccount {
     Write-Color "  3. Click '+ Salveaza cont curent' si foloseste numele: $name" Yellow
     Write-Host ""
 
-    if (-not (Test-Path $CREDS_FILE)) {
-        Write-Color "  ATENTIE: Fa si 'claude' login in terminal pentru CLI." DarkYellow
-    } else {
-        Read-Host "  Apasa Enter dupa ce ai salvat in extensie pentru a salva si CLI-ul"
+    Read-Host "  Apasa Enter dupa ce ai salvat in extensie (pentru a salva si CLI-ul)"
+
+    if (Test-Path $CREDS_FILE) {
         Copy-Item $CREDS_FILE "$ACCOUNTS_DIR\$name.json" -Force
+        if ($profileDir) { Set-AccountProfile $name $profileDir }
         Set-ActiveAccount $name
-        Write-Color "  CLI salvat pentru '$name'!" Green
+        Write-Color "  Cont '$name' salvat!" Green
+    } else {
+        Write-Color "  ATENTIE: Nu s-a gasit fisier CLI. Fa 'claude' login in terminal." DarkYellow
     }
     Start-Sleep 1
 }
@@ -125,7 +193,14 @@ function Switch-Account($name) {
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
     Write-Color "  CLI switched la: $name" Green
-    Write-Color "  Foloseste extensia Chrome pentru browser." DarkGray
+
+    $profileDir = Get-AccountProfile $name
+    if ($profileDir) {
+        Write-Color "  Deschid Chrome ($profileDir)..." Cyan
+        Open-ChromeProfile $profileDir
+    } else {
+        Write-Color "  (Niciun profil Chrome asociat)" DarkGray
+    }
     return $true
 }
 
@@ -170,6 +245,7 @@ function Delete-Account {
 
     $name = $accounts[$idx].BaseName
     Remove-Item "$ACCOUNTS_DIR\$name.json" -Force
+    Remove-Item "$ACCOUNTS_DIR\$name.profile" -Force -ErrorAction SilentlyContinue
     Write-Color "  Contul '$name' a fost sters." Yellow
     Start-Sleep 1
 }
@@ -246,8 +322,8 @@ while ($true) {
     List-Accounts
 
     Write-Color "  Optiuni:" White
-    Write-Color "  [A] Adauga / salveaza contul curent" White
-    Write-Color "  [S] Switch cont CLI" White
+    Write-Color "  [A] Adauga cont nou" White
+    Write-Color "  [S] Switch cont (CLI + deschide profilul Chrome)" White
     Write-Color "  [N] Auto-switch la urmatorul cont" White
     Write-Color "  [D] Sterge un cont" White
     Write-Color "  [I] Instaleaza hook auto-switch (la rate limit)" White
