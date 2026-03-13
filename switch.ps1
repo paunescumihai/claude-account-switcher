@@ -187,6 +187,22 @@ function Save-CurrentAccount {
     Start-Sleep 1
 }
 
+function Update-VSCodeTitle($name) {
+    $vsSettings = "$env:APPDATA\Code\User\settings.json"
+    if (-not (Test-Path $vsSettings)) { return }
+    try {
+        $s = Get-Content $vsSettings -Raw | ConvertFrom-Json
+        $title = "${name} | `${activeEditorShort}`${separator}`${rootName}"
+        if ($s | Get-Member -Name "window.title" -MemberType NoteProperty) {
+            $s."window.title" = $title
+        } else {
+            $s | Add-Member -NotePropertyName "window.title" -NotePropertyValue $title
+        }
+        $json = $s | ConvertTo-Json -Depth 10
+        [System.IO.File]::WriteAllText($vsSettings, $json, (New-Object System.Text.UTF8Encoding $false))
+    } catch {}
+}
+
 function Switch-Account($name) {
     $src = "$ACCOUNTS_DIR\$name.json"
     if (-not (Test-Path $src)) {
@@ -195,6 +211,7 @@ function Switch-Account($name) {
     }
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
+    Update-VSCodeTitle $name
     Write-Color "  CLI switched la: $name" Green
 
     $profileDir = Get-AccountProfile $name
