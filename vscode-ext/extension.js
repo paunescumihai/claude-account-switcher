@@ -112,6 +112,7 @@ async function addAccount() {
                     dir: p.dir
                 })),
                 { label: '', kind: vscode.QuickPickItemKind.Separator },
+                { label: '$(person-add) Adauga profil Chrome nou', dir: '__new__' },
                 { label: '$(refresh) Refresh profiluri Chrome', dir: '__refresh__' }
             ];
             const picked = await vscode.window.showQuickPick(items, {
@@ -120,6 +121,15 @@ async function addAccount() {
             });
             if (!picked) break;
             if (picked.dir === '__refresh__') {
+                profiles = getChromeProfiles();
+                continue;
+            }
+            if (picked.dir === '__new__') {
+                if (CHROME_EXE) exec(`"${CHROME_EXE}" chrome://profile-picker`);
+                await vscode.window.showInformationMessage(
+                    'Creeaza profilul in Chrome, apoi apasa OK pentru refresh.',
+                    { modal: true }, 'OK'
+                );
                 profiles = getChromeProfiles();
                 continue;
             }
