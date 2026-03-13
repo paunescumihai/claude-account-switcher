@@ -98,8 +98,12 @@ function List-Accounts {
     foreach ($acc in $accounts) {
         $name = $acc.BaseName
         $info = Get-AccountInfo $acc.FullName
-        $prof = Get-AccountProfile $name
-        $profLabel = if ($prof) { " | Chrome: $prof" } else { "" }
+        $profDir = Get-AccountProfile $name
+        $profLabel = if ($profDir) {
+            $cp = Get-ChromeProfiles | Where-Object { $_.Dir -eq $profDir } | Select-Object -First 1
+            $pn = if ($cp -and $cp.Name) { $cp.Name } else { $profDir }
+            " | Chrome: $pn"
+        } else { "" }
         $marker = ""
         $color = "White"
         if ($name -eq $active) {
@@ -124,9 +128,9 @@ function Pick-ChromeProfile {
     Write-Color "  Profiluri Chrome disponibile:" White
     $i = 1
     foreach ($p in $profiles) {
-        $label = $p.Name
-        if ($p.Email) { $label += " ($($p.Email))" }
-        Write-Color "  [$i] $($p.Dir) - $label" White
+        $label = if ($p.Name) { $p.Name } else { $p.Dir }
+        if ($p.Email) { $label += " - $($p.Email)" }
+        Write-Color "  [$i] $label" White
         $i++
     }
     Write-Host ""
