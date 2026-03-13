@@ -88,10 +88,71 @@ function getChromeProfiles() {
     } catch { return []; }
 }
 
-function updateStatusBar() {
+let lastUsage = null;
+let usageRefreshTimer = null;
+
+function formatUsage(u) {
+    if (!u) return null;
+    const pct = u.utilization !== undefined ? Math.round(u.utilization * 100) : null;
+    const reset = u.resets_at ? new Date(u.resets_at) : null;
+    const resetStr = reset ? reset.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    return { pct, resetStr };
+}
+
+function buildTooltip(name, usageData) {
+    if (!usageData || !usageData.usage) return 'Click pentru switch / adauga cont Claude';
+    const u = usageData.usage;
+    const lines = [`Claude: ${name || 'necunoscut'}`];
+    if (u.five_hour) {
+        const f = formatUsage(u.five_hour);
+        lines.push(`  5h:  ${f.pct ?? '?'}%${f.resetStr ? ' (reset ' + f.resetStr + ')' : ''}`);
+    }
+    if (u.seven_day) {
+        const s = formatUsage(u.seven_day);
+        lines.push(`  7d:  ${s.pct ?? '?'}%${s.resetStr ? ' (reset ' + s.resetStr + ')' : ''}`);
+    }
+    if (u.seven_day_sonnet) {
+        const sn = formatUsage(u.seven_day_sonnet);
+        if (sn.pct !== null) lines.push(`  Sonnet: ${sn.pct}%`);
+    }
+    if (u.seven_day_opus) {
+        const op = formatUsage(u.seven_day_opus);
+        if (op.pct !== null) lines.push(`  Opus:   ${op.pct}%`);
+    }
+    return lines.join('\n');
+}
+
+function updateStatusBar(usageData) {
+    if (usageData !== undefined) lastUsage = usageData;
     const active = getActive();
-    statusBarItem.text = `$(account) ${active || 'Claude'}`;
-    statusBarItem.tooltip = 'Click pentru switch / adauga cont Claude';
+    const u = lastUsage && lastUsage.usage;
+    const fivePct = u && u.five_hour && u.five_hour.utilization !== undefined
+        ? Math.round(u.five_hour.utilization * 100) : null;
+    statusBarItem.text = fivePct !== null
+        ? `$(account) ${active || 'Claude'} ${fivePct}%`
+        : `$(account) ${active || 'Claude'}`;
+    statusBarItem.tooltip = buildTooltip(active, lastUsage);
+}
+
+function fetchAndUpdateUsage() {
+    const active = getActive();
+    if (!active || !fs.existsSync(PYTHON_EXE) || !fs.existsSync(GET_USAGE_PY)) return;
+    const profileFile = path.join(ACCOUNTS_DIR, `${active}.profile`);
+    if (!fs.existsSync(profileFile)) return;
+    const profileDir = fs.readFileSync(profileFile, 'utf8').trim();
+    exec(`"${PYTHON_EXE}" "${GET_USAGE_PY}" "${profileDir}"`, { timeout: 20000 }, (err, stdout) => {
+        if (err || !stdout) return;
+        try {
+            const data = JSON.parse(stdout.trim());
+            if (!data.error) updateStatusBar(data);
+        } catch {}
+    });
+}
+
+function startUsageRefresh() {
+    fetchAndUpdateUsage();
+    if (usageRefreshTimer) clearInterval(usageRefreshTimer);
+    usageRefreshTimer = setInterval(fetchAndUpdateUsage, 5 * 60 * 1000);
 }
 
 function updateVSCodeTitle(name) {
@@ -110,6 +171,7 @@ function openChrome(profileDir) {
 
 const PYTHON_EXE     = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe');
 const GET_SESSION_PY = path.join(os.homedir(), 'claude-account-switcher', 'get-session-key.py');
+const GET_USAGE_PY   = path.join(os.homedir(), 'claude-account-switcher', 'get-usage.py');
 
 function restoreWidgetSession(name) {
     const profileFile = path.join(ACCOUNTS_DIR, `${name}.profile`);
@@ -303,6 +365,9 @@ async function showMenu() {
         }
 
         vscode.window.showInformationMessage(`Switched la: ${picked.name}`);
+        lastUsage = null;
+        updateStatusBar();
+        setTimeout(fetchAndUpdateUsage, 1000);
     } catch (e) {
         vscode.window.showErrorMessage(`Eroare la switch: ${e.message}`);
     }
@@ -323,8 +388,13 @@ function activate(context) {
         const watcher = fs.watch(ACCOUNTS_DIR, () => updateStatusBar());
         context.subscriptions.push({ dispose: () => watcher.close() });
     } catch {}
+
+    startUsageRefresh();
+    context.subscriptions.push({ dispose: () => { if (usageRefreshTimer) clearInterval(usageRefreshTimer); } });
 }
 
-function deactivate() {}
+function deactivate() {
+    if (usageRefreshTimer) clearInterval(usageRefreshTimer);
+}
 
 module.exports = { activate, deactivate };
