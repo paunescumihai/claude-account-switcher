@@ -233,7 +233,7 @@ async function showMenu() {
         })),
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         { label: '$(add) Adauga cont nou', action: 'add' },
-        { label: '$(key) Auto-Login (Chrome + Playwright)', action: 'autologin' }
+        { label: '$(trash) Sterge cont', action: 'delete' }
     ];
 
     const picked = await vscode.window.showQuickPick(items, {
@@ -245,34 +245,32 @@ async function showMenu() {
 
     if (picked.action === 'add') { await addAccount(); return; }
 
-    if (picked.action === 'autologin') {
-        const name = await vscode.window.showInputBox({
-            title: 'Auto-Login',
-            prompt: 'Numele contului (ex: paunescu@powerhost.ro)',
-            ignoreFocusOut: true
-        });
-        if (!name) return;
-
-        const profiles = getChromeProfiles();
-        let profileDir = null;
-        if (profiles.length > 0) {
-            const p = await vscode.window.showQuickPick(
-                profiles.map(p => ({ label: p.name, description: p.email, dir: p.dir })),
-                { title: 'Alege profilul Chrome', ignoreFocusOut: true }
-            );
-            if (p) profileDir = p.dir;
-        }
-
-        const AUTO_LOGIN_JS = path.join(os.homedir(), 'claude-account-switcher', 'auto-login.js');
-        if (!fs.existsSync(AUTO_LOGIN_JS)) {
-            vscode.window.showErrorMessage('auto-login.js nu a fost gasit.');
+    if (picked.action === 'delete') {
+        const accounts = getAccounts();
+        if (accounts.length === 0) {
+            vscode.window.showInformationMessage('Nu exista conturi salvate.');
             return;
         }
-
-        vscode.window.showInformationMessage(`Auto-login pornit pentru "${name}". Urmareste terminalul...`);
-        const terminal = vscode.window.createTerminal('Claude Auto-Login');
-        terminal.show();
-        terminal.sendText(`node "${AUTO_LOGIN_JS}" "${profileDir || 'Default'}" "${name}"`);
+        const toDelete = await vscode.window.showQuickPick(
+            accounts.map(name => ({ label: `$(account) ${name}`, name })),
+            { title: 'Sterge cont', placeHolder: 'Alege contul de sters', ignoreFocusOut: true }
+        );
+        if (!toDelete) return;
+        const confirm = await vscode.window.showWarningMessage(
+            `Stergi contul "${toDelete.name}"? Aceasta actiune nu poate fi anulata.`,
+            { modal: true }, 'Sterge'
+        );
+        if (confirm !== 'Sterge') return;
+        for (const ext of ['.json', '.profile', '.widget.json']) {
+            const f = path.join(ACCOUNTS_DIR, `${toDelete.name}${ext}`);
+            try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
+        }
+        const active = getActive();
+        if (active === toDelete.name) {
+            try { fs.unlinkSync(ACTIVE_FILE); } catch {}
+        }
+        updateStatusBar();
+        vscode.window.showInformationMessage(`Cont "${toDelete.name}" sters.`);
         return;
     }
 
