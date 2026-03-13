@@ -12,10 +12,55 @@ const LOCAL_STATE   = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chr
 const WIDGET_STORE  = path.join(os.homedir(), 'AppData', 'Roaming', 'claude-usage-widget', 'config.json');
 const WIDGET_DIR    = path.join(os.homedir(), 'claude-usage-widget-app');
 const ELECTRON_EXE  = path.join(WIDGET_DIR, 'node_modules', '.bin', 'electron.cmd');
-const CHROME_EXE    = [
+const CHROME_EXE      = [
     path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'Application', 'chrome.exe'),
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 ].find(p => fs.existsSync(p));
+const CHROME_USER_DATA = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+
+function createChromeProfile(profileName) {
+    // Gaseste urmatorul director disponibil (Profile 1, Profile 2, ...)
+    let dirName = 'Profile 1';
+    let n = 1;
+    while (fs.existsSync(path.join(CHROME_USER_DATA, dirName))) {
+        n++;
+        dirName = `Profile ${n}`;
+    }
+
+    // Creeaza directorul
+    const profilePath = path.join(CHROME_USER_DATA, dirName);
+    fs.mkdirSync(profilePath, { recursive: true });
+
+    // Creeaza Preferences cu numele profilului
+    const prefs = {
+        profile: {
+            name: profileName,
+            is_using_default_name: false,
+            user_name: ''
+        }
+    };
+    fs.writeFileSync(
+        path.join(profilePath, 'Preferences'),
+        JSON.stringify(prefs, null, 2),
+        'utf8'
+    );
+
+    // Actualizeaza Local State sa recunoasca profilul
+    try {
+        const ls = JSON.parse(fs.readFileSync(LOCAL_STATE, 'utf8'));
+        if (!ls.profile) ls.profile = {};
+        if (!ls.profile.info_cache) ls.profile.info_cache = {};
+        ls.profile.info_cache[dirName] = {
+            name: profileName,
+            is_using_default_name: false,
+            user_name: '',
+            active_time: Date.now() / 1000
+        };
+        fs.writeFileSync(LOCAL_STATE, JSON.stringify(ls), 'utf8');
+    } catch {}
+
+    return dirName;
+}
 
 let statusBarItem;
 
@@ -125,11 +170,14 @@ async function addAccount() {
                 continue;
             }
             if (picked.dir === '__new__') {
-                if (CHROME_EXE) exec(`"${CHROME_EXE}" chrome://profile-picker`);
-                await vscode.window.showInformationMessage(
-                    'Creeaza profilul in Chrome, apoi apasa OK pentru refresh.',
-                    { modal: true }, 'OK'
-                );
+                const newName = await vscode.window.showInputBox({
+                    title: 'Profil Chrome nou',
+                    prompt: 'Numele profilului (ex: claude cristi)',
+                    ignoreFocusOut: true
+                });
+                if (!newName) continue;
+                const newDir = createChromeProfile(newName);
+                vscode.window.showInformationMessage(`Profil "${newName}" creat (${newDir})`);
                 profiles = getChromeProfiles();
                 continue;
             }
