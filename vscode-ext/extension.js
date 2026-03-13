@@ -59,7 +59,8 @@ function updateVSCodeTitle(name) {
 
 function openChrome(profileDir) {
     if (!CHROME_EXE) return;
-    exec(`"${CHROME_EXE}" "--profile-directory=${profileDir}" https://claude.ai`);
+    const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+    exec(`"${CHROME_EXE}" --user-data-dir="${userDataDir}" --profile-directory="${profileDir}" --new-window https://claude.ai`);
 }
 
 const PYTHON_EXE     = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe');
