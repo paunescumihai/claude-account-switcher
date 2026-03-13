@@ -134,19 +134,69 @@ function updateStatusBar(usageData) {
     statusBarItem.tooltip = buildTooltip(active, lastUsage);
 }
 
-function fetchAndUpdateUsage() {
-    const active = getActive();
-    if (!active || !fs.existsSync(PYTHON_EXE) || !fs.existsSync(GET_USAGE_PY)) return;
-    const profileFile = path.join(ACCOUNTS_DIR, `${active}.profile`);
-    if (!fs.existsSync(profileFile)) return;
-    const profileDir = fs.readFileSync(profileFile, 'utf8').trim();
-    exec(`"${PYTHON_EXE}" "${GET_USAGE_PY}" "${profileDir}"`, { timeout: 20000 }, (err, stdout) => {
-        if (err || !stdout) return;
-        try {
-            const data = JSON.parse(stdout.trim());
-            if (!data.error) updateStatusBar(data);
-        } catch {}
+function getSessionKey(accountName) {
+    // Try account-specific widget.json first
+    const accountWidget = path.join(ACCOUNTS_DIR, `${accountName}.widget.json`);
+    if (fs.existsSync(accountWidget)) {
+        try { return JSON.parse(fs.readFileSync(accountWidget, 'utf8')).sessionKey; } catch {}
+    }
+    // Fallback to global widget store
+    if (fs.existsSync(WIDGET_STORE)) {
+        try { return JSON.parse(fs.readFileSync(WIDGET_STORE, 'utf8')).sessionKey; } catch {}
+    }
+    return null;
+}
+
+function httpsGet(url, headers) {
+    return new Promise((resolve, reject) => {
+        const https = require('https');
+        const u = new URL(url);
+        https.get({ hostname: u.hostname, path: u.pathname + u.search, headers }, (res) => {
+            let body = '';
+            res.on('data', d => body += d);
+            res.on('end', () => {
+                try { resolve(JSON.parse(body)); }
+                catch { reject(new Error('bad json')); }
+            });
+        }).on('error', reject);
     });
+}
+
+async function ensureSessionKey(accountName) {
+    let key = getSessionKey(accountName);
+    if (key) return key;
+    // Try CDP (works when Chrome started with --remote-debugging-port=9222)
+    key = await cdpGetSessionKey();
+    if (key) {
+        const widgetFile = path.join(ACCOUNTS_DIR, `${accountName}.widget.json`);
+        let existing = {};
+        try { existing = JSON.parse(fs.readFileSync(widgetFile, 'utf8')); } catch {}
+        existing.sessionKey = key;
+        try { fs.writeFileSync(widgetFile, JSON.stringify(existing, null, 2), 'utf8'); } catch {}
+    }
+    return key;
+}
+
+async function fetchAndUpdateUsage() {
+    const active = getActive();
+    if (!active) return;
+    const sessionKey = await ensureSessionKey(active);
+    if (!sessionKey) return;
+
+    const headers = {
+        'Cookie': `sessionKey=${sessionKey}`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'application/json',
+        'Referer': 'https://claude.ai/'
+    };
+
+    try {
+        const orgs = await httpsGet('https://claude.ai/api/organizations', headers);
+        if (!Array.isArray(orgs) || !orgs[0]) return;
+        const orgId = orgs[0].uuid || orgs[0].id;
+        const usage = await httpsGet(`https://claude.ai/api/organizations/${orgId}/usage`, headers);
+        if (usage && !usage.error) updateStatusBar({ usage });
+    } catch {}
 }
 
 function startUsageRefresh() {
@@ -166,7 +216,80 @@ function updateVSCodeTitle(name) {
 function openChrome(profileDir) {
     if (!CHROME_EXE) return;
     const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
-    exec(`"${CHROME_EXE}" --user-data-dir="${userDataDir}" --profile-directory="${profileDir}" --new-window https://claude.ai`);
+    exec(`"${CHROME_EXE}" --user-data-dir="${userDataDir}" --profile-directory="${profileDir}" --remote-debugging-port=9222 --remote-allow-origins=* --new-window https://claude.ai`);
+}
+
+function cdpGetSessionKey() {
+    return new Promise((resolve) => {
+        const http = require('http');
+        const net = require('net');
+        const crypto = require('crypto');
+
+        http.get('http://localhost:9222/json/list', { timeout: 3000 }, (res) => {
+            let body = '';
+            res.on('data', d => body += d);
+            res.on('end', () => {
+                try {
+                    const tabs = JSON.parse(body);
+                    const tab = tabs.find(t => t.webSocketDebuggerUrl);
+                    if (!tab) { resolve(null); return; }
+
+                    const wsUrl = new URL(tab.webSocketDebuggerUrl);
+                    const wsKey = crypto.randomBytes(16).toString('base64');
+                    const sock = net.connect(parseInt(wsUrl.port) || 9222, wsUrl.hostname);
+                    sock.setTimeout(8000);
+                    sock.on('timeout', () => { sock.destroy(); resolve(null); });
+                    sock.on('error', () => resolve(null));
+
+                    let upgraded = false;
+                    let buf = Buffer.alloc(0);
+
+                    sock.on('connect', () => {
+                        sock.write(
+                            `GET ${wsUrl.pathname} HTTP/1.1\r\nHost: ${wsUrl.host}\r\n` +
+                            `Upgrade: websocket\r\nConnection: Upgrade\r\n` +
+                            `Sec-WebSocket-Key: ${wsKey}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+                        );
+                    });
+
+                    sock.on('data', (chunk) => {
+                        if (!upgraded) {
+                            const str = chunk.toString();
+                            if (str.includes('101')) {
+                                upgraded = true;
+                                const idx = str.indexOf('\r\n\r\n');
+                                buf = idx !== -1 ? chunk.slice(idx + 4) : Buffer.alloc(0);
+                                const msg = Buffer.from(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
+                                const frame = Buffer.alloc(msg.length + 2);
+                                frame[0] = 0x81; frame[1] = msg.length;
+                                msg.copy(frame, 2);
+                                sock.write(frame);
+                            }
+                            return;
+                        }
+                        buf = Buffer.concat([buf, chunk]);
+                        while (buf.length >= 2) {
+                            let len = buf[1] & 0x7f;
+                            let offset = 2;
+                            if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); offset = 4; }
+                            if (buf.length < offset + len) break;
+                            const payload = buf.slice(offset, offset + len).toString();
+                            buf = buf.slice(offset + len);
+                            try {
+                                const m = JSON.parse(payload);
+                                if (m.id === 1 && m.result && m.result.cookies) {
+                                    const sk = m.result.cookies.find(c => c.name === 'sessionKey' && c.domain.includes('claude.ai'));
+                                    sock.destroy();
+                                    resolve(sk ? sk.value : null);
+                                    return;
+                                }
+                            } catch {}
+                        }
+                    });
+                } catch { resolve(null); }
+            });
+        }).on('error', () => resolve(null));
+    });
 }
 
 const PYTHON_EXE     = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe');
@@ -297,7 +420,8 @@ async function showMenu() {
         })),
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         { label: '$(add) Adauga cont nou', action: 'add' },
-        { label: '$(trash) Sterge cont', action: 'delete' }
+        { label: '$(trash) Sterge cont', action: 'delete' },
+        { label: '$(graph) Setup Usage Stats', action: 'usage-setup' }
     ];
 
     const picked = await vscode.window.showQuickPick(items, {
@@ -367,7 +491,8 @@ async function showMenu() {
         vscode.window.showInformationMessage(`Switched la: ${picked.name}`);
         lastUsage = null;
         updateStatusBar();
-        setTimeout(fetchAndUpdateUsage, 1000);
+        // Wait for Chrome to load, then try CDP to get sessionKey automatically
+        setTimeout(fetchAndUpdateUsage, 5000);
     } catch (e) {
         vscode.window.showErrorMessage(`Eroare la switch: ${e.message}`);
     }

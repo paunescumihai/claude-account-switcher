@@ -36,43 +36,20 @@ def get_cookies(profile_dir):
         return {}
 
     key = get_chrome_key()
-    tmp = tempfile.mktemp(suffix='.db')
-
-    # Windows shared read while Chrome has it locked
-    import ctypes
-    GENERIC_READ = 0x80000000
-    FILE_SHARE_READ = 0x1
-    FILE_SHARE_WRITE = 0x2
-    FILE_SHARE_DELETE = 0x4
-    OPEN_EXISTING = 3
-    handle = ctypes.windll.kernel32.CreateFileW(
-        str(cookies_path), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        None, OPEN_EXISTING, 0, None
-    )
-    if handle == ctypes.c_void_p(-1).value:
-        shutil.copy2(cookies_path, tmp)
-    else:
-        import msvcrt
-        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY)
-        with os.fdopen(fd, 'rb') as src:
-            with open(tmp, 'wb') as dst:
-                dst.write(src.read())
+    uri = 'file:' + str(cookies_path).replace('\\', '/') + '?immutable=1&mode=ro'
 
     result = {}
     try:
-        conn = sqlite3.connect(tmp)
-        cursor = conn.execute(
+        conn = sqlite3.connect(uri, uri=True)
+        for name, enc_val in conn.execute(
             "SELECT name, encrypted_value FROM cookies WHERE host_key LIKE '%claude.ai%'"
-        )
-        for name, enc_val in cursor.fetchall():
+        ).fetchall():
             val = decrypt_cookie(enc_val, key)
             if val:
                 result[name] = val
         conn.close()
-    finally:
-        try: os.unlink(tmp)
-        except: pass
+    except Exception as e:
+        print(f"Eroare citire cookies: {e}", file=sys.stderr)
 
     return result
 

@@ -39,27 +39,18 @@ def get_session_key(profile_dir):
         return None, None
 
     key = get_chrome_key()
-
-    # Copiem DB pentru ca Chrome il tine locked
-    tmp = tempfile.mktemp(suffix='.db')
-    shutil.copy2(cookies_path, tmp)
+    uri = 'file:' + str(cookies_path).replace('\\', '/') + '?immutable=1&mode=ro'
 
     session_key = None
     org_id = None
-    try:
-        conn = sqlite3.connect(tmp)
-        cursor = conn.execute(
-            "SELECT name, encrypted_value FROM cookies WHERE host_key LIKE '%claude.ai%'"
-        )
-        for name, enc_val in cursor.fetchall():
-            val = decrypt_cookie(enc_val, key)
-            if name == 'sessionKey' and val:
-                session_key = val
-            if name == '__Host-CH-prefers-color-scheme' and val:
-                pass  # nu ne trebuie
-        conn.close()
-    finally:
-        os.unlink(tmp)
+    conn = sqlite3.connect(uri, uri=True)
+    for name, enc_val in conn.execute(
+        "SELECT name, encrypted_value FROM cookies WHERE host_key LIKE '%claude.ai%'"
+    ).fetchall():
+        val = decrypt_cookie(enc_val, key)
+        if name == 'sessionKey' and val:
+            session_key = val
+    conn.close()
 
     return session_key, org_id
 
