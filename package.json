@@ -1,0 +1,12 @@
+{
+  "name": "claude-account-switcher",
+  "version": "1.0.0",
+  "description": "Switch between Claude accounts automatically",
+  "scripts": {
+    "capture": "node browser-switch.js capture",
+    "switch": "node browser-switch.js switch"
+  },
+  "dependencies": {
+    "playwright": "^1.51.0"
+  }
+}

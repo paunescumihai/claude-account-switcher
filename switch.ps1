@@ -1,8 +1,9 @@
 # Claude Account Switcher
-# Saves credentials per account and switches automatically when credits run out
 
-$CREDS_FILE  = "$env:USERPROFILE\.claude\.credentials.json"
-$ACCOUNTS_DIR = "$env:USERPROFILE\.claude\accounts"
+$CREDS_FILE    = "$env:USERPROFILE\.claude\.credentials.json"
+$ACCOUNTS_DIR  = "$env:USERPROFILE\.claude\accounts"
+$NODE_EXE      = "C:\Program Files\nodejs\node.exe"
+$BROWSER_SCRIPT = "$PSScriptRoot\browser-switch.js"
 
 if (-not (Test-Path $ACCOUNTS_DIR)) {
     New-Item -ItemType Directory -Path $ACCOUNTS_DIR -Force | Out-Null
@@ -14,9 +15,9 @@ function Write-Color($text, $color = "White") {
 
 function Show-Banner {
     Clear-Host
-    Write-Color "╔══════════════════════════════════════╗" Cyan
-    Write-Color "║      CLAUDE ACCOUNT SWITCHER         ║" Cyan
-    Write-Color "╚══════════════════════════════════════╝" Cyan
+    Write-Color "======================================" Cyan
+    Write-Color "      CLAUDE ACCOUNT SWITCHER         " Cyan
+    Write-Color "======================================" Cyan
     Write-Host ""
 }
 
@@ -34,6 +35,21 @@ function Set-ActiveAccount($name) {
     Set-Content -Path "$ACCOUNTS_DIR\.active" -Value $name
 }
 
+function Get-AccountInfo($jsonPath) {
+    try {
+        $data = Get-Content $jsonPath -Raw | ConvertFrom-Json
+        $oauth = $data.claudeAiOauth
+        $plan  = $oauth.subscriptionType
+        $tier  = $oauth.rateLimitTier
+        $exp   = $oauth.expiresAt
+        $expDate = [DateTimeOffset]::FromUnixTimeMilliseconds($exp).LocalDateTime
+        $expired = if ($expDate -lt (Get-Date)) { " [TOKEN EXPIRAT]" } else { "" }
+        return "$plan / $tier$expired"
+    } catch {
+        return "necunoscut"
+    }
+}
+
 function List-Accounts {
     $accounts = Get-Accounts
     $active = Get-ActiveAccount
@@ -48,9 +64,15 @@ function List-Accounts {
     $i = 1
     foreach ($acc in $accounts) {
         $name = $acc.BaseName
-        $marker = if ($name -eq $active) { " <<< ACTIV" } else { "" }
-        $color  = if ($name -eq $active) { "Green" } else { "White" }
+        $info = Get-AccountInfo $acc.FullName
+        $marker = ""
+        $color = "White"
+        if ($name -eq $active) {
+            $marker = " [ACTIV]"
+            $color = "Green"
+        }
         Write-Color "  [$i] $name$marker" $color
+        Write-Color "      $info" DarkGray
         $i++
     }
     Write-Host ""
@@ -76,6 +98,10 @@ function Save-CurrentAccount {
     Start-Sleep 1
 }
 
+function Has-BrowserSession($name) {
+    return Test-Path "$ACCOUNTS_DIR\browser-$name.json"
+}
+
 function Switch-Account($name) {
     $src = "$ACCOUNTS_DIR\$name.json"
     if (-not (Test-Path $src)) {
@@ -84,7 +110,15 @@ function Switch-Account($name) {
     }
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
-    Write-Color "  Switched la contul: $name" Green
+    Write-Color "  CLI switched la: $name" Green
+
+    # Deschide browser cu sesiunea salvata daca exista
+    if (Has-BrowserSession $name) {
+        Write-Color "  Deschid browser cu sesiunea lui $name..." Cyan
+        Start-Process $NODE_EXE -ArgumentList "`"$BROWSER_SCRIPT`" switch `"$name`"" -NoNewWindow
+    } else {
+        Write-Color "  (Fara sesiune browser salvata - doar CLI a fost schimbat)" DarkGray
+    }
     return $true
 }
 
@@ -108,6 +142,37 @@ function Switch-AccountMenu {
     $name = $accounts[$idx].BaseName
     Switch-Account $name | Out-Null
     Start-Sleep 1
+}
+
+function Capture-BrowserSession {
+    Show-Banner
+    List-Accounts
+
+    $accounts = Get-Accounts
+    if ($accounts.Count -eq 0) { Read-Host "  Apasa Enter..."; return }
+
+    $choice = Read-Host "  Numarul contului pentru care salvezi sesiunea browser"
+    if ([string]::IsNullOrWhiteSpace($choice)) { return }
+
+    $idx = [int]$choice - 1
+    if ($idx -lt 0 -or $idx -ge $accounts.Count) {
+        Write-Color "  Optiune invalida." Red
+        Start-Sleep 1
+        return
+    }
+
+    $name = $accounts[$idx].BaseName
+    Write-Color "" White
+    Write-Color "  Se va deschide un browser Chrome." Yellow
+    Write-Color "  1. Logheaza-te pe claude.ai cu contul '$name'" Yellow
+    Write-Color "  2. Inchide fereastra browser-ului" Yellow
+    Write-Color "  3. Sesiunea se salveaza automat" Yellow
+    Write-Host ""
+    Read-Host "  Apasa Enter pentru a deschide browser-ul"
+
+    & $NODE_EXE $BROWSER_SCRIPT capture $name
+    Write-Color "  Sesiunea browser salvata pentru '$name'!" Green
+    Start-Sleep 2
 }
 
 function Delete-Account {
@@ -134,12 +199,12 @@ function Delete-Account {
 }
 
 function Auto-SwitchNext {
-    $accounts  = Get-Accounts
-    $active    = Get-ActiveAccount
-    $names     = $accounts | ForEach-Object { $_.BaseName }
+    $accounts = Get-Accounts
+    $active   = Get-ActiveAccount
+    $names    = $accounts | ForEach-Object { $_.BaseName }
 
     if ($names.Count -le 1) {
-        Write-Color "  Nu sunt destule conturi pentru auto-switch (ai nevoie de minim 2)." Red
+        Write-Color "  Nu sunt destule conturi pentru auto-switch (minim 2)." Red
         return $false
     }
 
@@ -147,43 +212,41 @@ function Auto-SwitchNext {
     $nextIdx    = ($currentIdx + 1) % $names.Count
     $nextName   = $names[$nextIdx]
 
-    Write-Color "" White
     Write-Color "  AUTO-SWITCH: '$active' -> '$nextName'" Magenta
     return (Switch-Account $nextName)
 }
 
 function Install-Hook {
-    # Instaleaza hook-ul in Claude settings pentru auto-switch la rate limit
     $settingsFile = "$env:USERPROFILE\.claude\settings.json"
-    $hookScript   = (Resolve-Path "$PSScriptRoot\auto-switch-hook.ps1").Path
+    $hookScript   = "$PSScriptRoot\auto-switch-hook.ps1"
 
     $settings = if (Test-Path $settingsFile) {
-        Get-Content $settingsFile | ConvertFrom-Json
+        Get-Content $settingsFile -Raw | ConvertFrom-Json
     } else {
-        [PSCustomObject]@{}
+        New-Object PSObject
     }
 
     $hookCmd = "powershell -ExecutionPolicy Bypass -File `"$hookScript`""
 
-    $hook = [PSCustomObject]@{
+    $hookEntry = New-Object PSObject -Property @{
         matcher = ""
         hooks   = @(
-            [PSCustomObject]@{
+            New-Object PSObject -Property @{
                 type    = "command"
                 command = $hookCmd
             }
         )
     }
 
-    if (-not $settings.PSObject.Properties["hooks"]) {
-        $settings | Add-Member -NotePropertyName "hooks" -NotePropertyValue @{}
+    if (-not ($settings | Get-Member -Name "hooks" -MemberType NoteProperty)) {
+        $settings | Add-Member -NotePropertyName "hooks" -NotePropertyValue (New-Object PSObject)
     }
-    if (-not $settings.hooks.PSObject.Properties["Stop"]) {
+    if (-not ($settings.hooks | Get-Member -Name "Stop" -MemberType NoteProperty)) {
         $settings.hooks | Add-Member -NotePropertyName "Stop" -NotePropertyValue @()
     }
 
-    $settings.hooks.Stop = @($hook)
-    $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile
+    $settings.hooks.Stop = @($hookEntry)
+    $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
     Write-Color "  Hook instalat in Claude settings!" Green
     Start-Sleep 1
 }
@@ -192,23 +255,24 @@ function Uninstall-Hook {
     $settingsFile = "$env:USERPROFILE\.claude\settings.json"
     if (-not (Test-Path $settingsFile)) { return }
 
-    $settings = Get-Content $settingsFile | ConvertFrom-Json
-    if ($settings.hooks -and $settings.hooks.PSObject.Properties["Stop"]) {
+    $settings = Get-Content $settingsFile -Raw | ConvertFrom-Json
+    if ($settings.hooks -and ($settings.hooks | Get-Member -Name "Stop" -MemberType NoteProperty)) {
         $settings.hooks.PSObject.Properties.Remove("Stop")
     }
-    $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile
+    $settings | ConvertTo-Json -Depth 10 | Set-Content $settingsFile -Encoding UTF8
     Write-Color "  Hook dezinstalat." Yellow
     Start-Sleep 1
 }
 
-# ── Main Menu ─────────────────────────────────────────────────────────────────
+# ── Main Menu ──────────────────────────────────────────────────────────────────
 while ($true) {
     Show-Banner
     List-Accounts
 
     Write-Color "  Optiuni:" White
     Write-Color "  [A] Adauga / salveaza contul curent" White
-    Write-Color "  [S] Switch cont manual" White
+    Write-Color "  [B] Salveaza sesiunea browser pentru un cont" Cyan
+    Write-Color "  [S] Switch cont (CLI + browser)" White
     Write-Color "  [N] Auto-switch la urmatorul cont" White
     Write-Color "  [D] Sterge un cont" White
     Write-Color "  [I] Instaleaza hook auto-switch (la rate limit)" White
@@ -220,6 +284,7 @@ while ($true) {
 
     switch ($opt.ToUpper()) {
         "A" { Save-CurrentAccount }
+        "B" { Capture-BrowserSession }
         "S" { Switch-AccountMenu }
         "N" { Auto-SwitchNext; Start-Sleep 1 }
         "D" { Delete-Account }
