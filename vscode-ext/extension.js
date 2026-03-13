@@ -467,20 +467,32 @@ async function showMenu() {
     }
 
     if (picked.action === 'usage-setup') {
-        const active = getActive();
-        if (!active) { vscode.window.showWarningMessage('Nu exista cont activ.'); return; }
-        const profileFile = path.join(ACCOUNTS_DIR, `${active}.profile`);
-        if (fs.existsSync(profileFile)) openChrome(fs.readFileSync(profileFile, 'utf8').trim());
-        vscode.window.showInformationMessage(`Se extrage sessionKey pentru "${active}"... (asteapta 5s)`);
+        const activeAcc = getActive();
+        if (!activeAcc) { vscode.window.showWarningMessage('Nu exista cont activ.'); return; }
+        const profileFile = path.join(ACCOUNTS_DIR, `${activeAcc}.profile`);
+        const profileDir = fs.existsSync(profileFile) ? fs.readFileSync(profileFile, 'utf8').trim() : null;
+
+        vscode.window.showInformationMessage(`Se inchide Chrome si se redeschide cu debug port pentru "${activeAcc}"...`);
+
+        // Kill Chrome first so --remote-debugging-port is respected
+        await new Promise(resolve => exec('taskkill /IM chrome.exe /F', () => resolve()));
+        await new Promise(resolve => setTimeout(resolve, 1500));
+
+        const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+        if (CHROME_EXE && profileDir) {
+            exec(`"${CHROME_EXE}" --user-data-dir="${userDataDir}" --profile-directory="${profileDir}" --remote-debugging-port=9222 --remote-allow-origins=* https://claude.ai`);
+        }
+
+        vscode.window.showInformationMessage(`Chrome pornit. Se extrage sessionKey (asteapta 8s)...`);
         setTimeout(async () => {
             lastUsage = null;
             await fetchAndUpdateUsage();
-            if (getSessionKey(active)) {
-                vscode.window.showInformationMessage(`Usage stats activ pentru "${active}"!`);
+            if (getSessionKey(activeAcc)) {
+                vscode.window.showInformationMessage(`Usage stats activ pentru "${activeAcc}"!`);
             } else {
-                vscode.window.showWarningMessage(`Nu s-a putut obtine sessionKey. Asigura-te ca Chrome e deschis pe claude.ai.`);
+                vscode.window.showWarningMessage(`Nu s-a putut obtine sessionKey. Incearca din nou.`);
             }
-        }, 5000);
+        }, 8000);
         return;
     }
 
