@@ -1,9 +1,7 @@
 # Claude Account Switcher
 
-$CREDS_FILE    = "$env:USERPROFILE\.claude\.credentials.json"
-$ACCOUNTS_DIR  = "$env:USERPROFILE\.claude\accounts"
-$NODE_EXE      = "C:\Program Files\nodejs\node.exe"
-$BROWSER_SCRIPT = "$PSScriptRoot\browser-switch.js"
+$CREDS_FILE   = "$env:USERPROFILE\.claude\.credentials.json"
+$ACCOUNTS_DIR = "$env:USERPROFILE\.claude\accounts"
 
 if (-not (Test-Path $ACCOUNTS_DIR)) {
     New-Item -ItemType Directory -Path $ACCOUNTS_DIR -Force | Out-Null
@@ -98,10 +96,6 @@ function Save-CurrentAccount {
     Start-Sleep 1
 }
 
-function Has-BrowserSession($name) {
-    return Test-Path "$ACCOUNTS_DIR\browser-$name.json"
-}
-
 function Switch-Account($name) {
     $src = "$ACCOUNTS_DIR\$name.json"
     if (-not (Test-Path $src)) {
@@ -111,14 +105,7 @@ function Switch-Account($name) {
     Copy-Item $src $CREDS_FILE -Force
     Set-ActiveAccount $name
     Write-Color "  CLI switched la: $name" Green
-
-    # Deschide browser cu sesiunea salvata daca exista
-    if (Has-BrowserSession $name) {
-        Write-Color "  Deschid browser cu sesiunea lui $name..." Cyan
-        Start-Process $NODE_EXE -ArgumentList "`"$BROWSER_SCRIPT`" switch `"$name`"" -NoNewWindow
-    } else {
-        Write-Color "  (Fara sesiune browser salvata - doar CLI a fost schimbat)" DarkGray
-    }
+    Write-Color "  Foloseste extensia Chrome pentru browser." DarkGray
     return $true
 }
 
@@ -142,37 +129,6 @@ function Switch-AccountMenu {
     $name = $accounts[$idx].BaseName
     Switch-Account $name | Out-Null
     Start-Sleep 1
-}
-
-function Capture-BrowserSession {
-    Show-Banner
-    List-Accounts
-
-    $accounts = Get-Accounts
-    if ($accounts.Count -eq 0) { Read-Host "  Apasa Enter..."; return }
-
-    $choice = Read-Host "  Numarul contului pentru care salvezi sesiunea browser"
-    if ([string]::IsNullOrWhiteSpace($choice)) { return }
-
-    $idx = [int]$choice - 1
-    if ($idx -lt 0 -or $idx -ge $accounts.Count) {
-        Write-Color "  Optiune invalida." Red
-        Start-Sleep 1
-        return
-    }
-
-    $name = $accounts[$idx].BaseName
-    Write-Color "" White
-    Write-Color "  Se va deschide un browser Chrome." Yellow
-    Write-Color "  1. Logheaza-te pe claude.ai cu contul '$name'" Yellow
-    Write-Color "  2. Inchide fereastra browser-ului" Yellow
-    Write-Color "  3. Sesiunea se salveaza automat" Yellow
-    Write-Host ""
-    Read-Host "  Apasa Enter pentru a deschide browser-ul"
-
-    & $NODE_EXE $BROWSER_SCRIPT capture $name
-    Write-Color "  Sesiunea browser salvata pentru '$name'!" Green
-    Start-Sleep 2
 }
 
 function Delete-Account {
@@ -271,8 +227,7 @@ while ($true) {
 
     Write-Color "  Optiuni:" White
     Write-Color "  [A] Adauga / salveaza contul curent" White
-    Write-Color "  [B] Salveaza sesiunea browser pentru un cont" Cyan
-    Write-Color "  [S] Switch cont (CLI + browser)" White
+    Write-Color "  [S] Switch cont CLI" White
     Write-Color "  [N] Auto-switch la urmatorul cont" White
     Write-Color "  [D] Sterge un cont" White
     Write-Color "  [I] Instaleaza hook auto-switch (la rate limit)" White
@@ -284,7 +239,6 @@ while ($true) {
 
     switch ($opt.ToUpper()) {
         "A" { Save-CurrentAccount }
-        "B" { Capture-BrowserSession }
         "S" { Switch-AccountMenu }
         "N" { Auto-SwitchNext; Start-Sleep 1 }
         "D" { Delete-Account }
