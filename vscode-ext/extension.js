@@ -466,7 +466,25 @@ async function showMenu() {
         return;
     }
 
-    if (picked.name === active) return;
+    if (picked.action === 'usage-setup') {
+        const active = getActive();
+        if (!active) { vscode.window.showWarningMessage('Nu exista cont activ.'); return; }
+        const profileFile = path.join(ACCOUNTS_DIR, `${active}.profile`);
+        if (fs.existsSync(profileFile)) openChrome(fs.readFileSync(profileFile, 'utf8').trim());
+        vscode.window.showInformationMessage(`Se extrage sessionKey pentru "${active}"... (asteapta 5s)`);
+        setTimeout(async () => {
+            lastUsage = null;
+            await fetchAndUpdateUsage();
+            if (getSessionKey(active)) {
+                vscode.window.showInformationMessage(`Usage stats activ pentru "${active}"!`);
+            } else {
+                vscode.window.showWarningMessage(`Nu s-a putut obtine sessionKey. Asigura-te ca Chrome e deschis pe claude.ai.`);
+            }
+        }, 5000);
+        return;
+    }
+
+    if (!picked.name || picked.name === active) return;
 
     const REFRESH_PY = path.join(os.homedir(), 'claude-account-switcher', 'refresh-token.py');
     const src = path.join(ACCOUNTS_DIR, `${picked.name}.json`);
