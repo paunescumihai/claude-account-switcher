@@ -207,14 +207,30 @@ function Update-VSCodeTitle($name) {
 $WIDGET_STORE = "$env:APPDATA\claude-usage-widget\config.json"
 $ELECTRON_EXE = "$env:USERPROFILE\claude-usage-widget-app\node_modules\.bin\electron.cmd"
 
+$PYTHON_EXE     = "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe"
+$GET_SESSION_PY = "$PSScriptRoot\get-session-key.py"
+
 function Save-WidgetSession($name) {
-    if (Test-Path $WIDGET_STORE) {
+    # Incearca sa extraga sessionKey din Chrome
+    $profDir = Get-AccountProfile $name
+    if ($profDir -and (Test-Path $PYTHON_EXE) -and (Test-Path $GET_SESSION_PY)) {
+        Write-Color "  Extrag sessionKey din Chrome..." Cyan
+        & $PYTHON_EXE $GET_SESSION_PY $profDir $name 2>&1 | ForEach-Object { Write-Color "  $_" DarkGray }
+    } elseif (Test-Path $WIDGET_STORE) {
         Copy-Item $WIDGET_STORE "$ACCOUNTS_DIR\$name.widget.json" -Force
         Write-Color "  Sesiune widget salvata pentru '$name'" Green
     }
 }
 
 function Restore-WidgetSession($name) {
+    # Incearca intai sa extraga fresh din Chrome
+    $profDir = Get-AccountProfile $name
+    if ($profDir -and (Test-Path $PYTHON_EXE) -and (Test-Path $GET_SESSION_PY)) {
+        Write-Color "  Extrag sessionKey din Chrome pentru '$name'..." Cyan
+        & $PYTHON_EXE $GET_SESSION_PY $profDir $name 2>&1 | ForEach-Object { Write-Color "  $_" DarkGray }
+        return $true
+    }
+    # Fallback: restaureaza din backup
     $saved = "$ACCOUNTS_DIR\$name.widget.json"
     if (Test-Path $saved) {
         $dir = Split-Path $WIDGET_STORE

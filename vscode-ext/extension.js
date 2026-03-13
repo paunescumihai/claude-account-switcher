@@ -62,7 +62,18 @@ function openChrome(profileDir) {
     exec(`"${CHROME_EXE}" "--profile-directory=${profileDir}" https://claude.ai`);
 }
 
+const PYTHON_EXE     = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe');
+const GET_SESSION_PY = path.join(os.homedir(), 'claude-account-switcher', 'get-session-key.py');
+
 function restoreWidgetSession(name) {
+    const profileFile = path.join(ACCOUNTS_DIR, `${name}.profile`);
+    if (fs.existsSync(profileFile) && fs.existsSync(PYTHON_EXE) && fs.existsSync(GET_SESSION_PY)) {
+        const profileDir = fs.readFileSync(profileFile, 'utf8').trim();
+        exec(`"${PYTHON_EXE}" "${GET_SESSION_PY}" "${profileDir}" "${name}"`, (err, stdout, stderr) => {
+            if (err) console.error('Widget session error:', stderr);
+        });
+        return true;
+    }
     const saved = path.join(ACCOUNTS_DIR, `${name}.widget.json`);
     if (!fs.existsSync(saved)) return false;
     try {
