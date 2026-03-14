@@ -71,7 +71,7 @@ function getActive() {
 function getAccounts() {
     try {
         return fs.readdirSync(ACCOUNTS_DIR)
-            .filter(f => f.endsWith('.json'))
+            .filter(f => f.endsWith('.json') && !f.endsWith('.widget.json'))
             .map(f => f.replace('.json', ''));
     } catch { return []; }
 }
@@ -89,11 +89,12 @@ function getChromeProfiles() {
 }
 
 let lastUsage = null;
+let lastUsageTime = null;
 let usageRefreshTimer = null;
 
 function formatUsage(u) {
     if (!u) return null;
-    const pct = u.utilization !== undefined ? Math.round(u.utilization * 100) : null;
+    const pct = u.utilization !== undefined ? Math.round(u.utilization) : null;
     const reset = u.resets_at ? new Date(u.resets_at) : null;
     const resetStr = reset ? reset.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
     return { pct, resetStr };
@@ -119,15 +120,16 @@ function buildTooltip(name, usageData) {
         const op = formatUsage(u.seven_day_opus);
         if (op.pct !== null) lines.push(`  Opus:   ${op.pct}%`);
     }
+    if (lastUsageTime) lines.push(`  Actualizat: ${lastUsageTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
     return lines.join('\n');
 }
 
 function updateStatusBar(usageData) {
-    if (usageData !== undefined) lastUsage = usageData;
+    if (usageData !== undefined) { lastUsage = usageData; lastUsageTime = new Date(); }
     const active = getActive();
     const u = lastUsage && lastUsage.usage;
     const fivePct = u && u.five_hour && u.five_hour.utilization !== undefined
-        ? Math.round(u.five_hour.utilization * 100) : null;
+        ? Math.round(u.five_hour.utilization) : null;
     statusBarItem.text = fivePct !== null
         ? `$(account) ${active || 'Claude'} ${fivePct}%`
         : `$(account) ${active || 'Claude'}`;
@@ -166,32 +168,21 @@ async function ensureSessionKey(accountName) {
     return getSessionKey(accountName);
 }
 
-async function fetchAndUpdateUsage() {
+function fetchAndUpdateUsage() {
+    // Read cached usage from widget.json — no network requests (avoids UI freeze)
     const active = getActive();
     if (!active) return;
-    const sessionKey = await ensureSessionKey(active);
-    if (!sessionKey) return;
-
-    const headers = {
-        'Cookie': `sessionKey=${sessionKey}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Accept': 'application/json',
-        'Referer': 'https://claude.ai/'
-    };
-
+    const widgetFile = path.join(ACCOUNTS_DIR, `${active}.widget.json`);
     try {
-        const orgs = await httpsGet('https://claude.ai/api/organizations', headers);
-        if (!Array.isArray(orgs) || !orgs[0]) return;
-        const orgId = orgs[0].uuid || orgs[0].id;
-        const usage = await httpsGet(`https://claude.ai/api/organizations/${orgId}/usage`, headers);
-        if (usage && !usage.error) updateStatusBar({ usage });
+        const data = JSON.parse(fs.readFileSync(widgetFile, 'utf8'));
+        if (data.usage) updateStatusBar({ usage: data.usage });
     } catch {}
 }
 
 function startUsageRefresh() {
     fetchAndUpdateUsage();
     if (usageRefreshTimer) clearInterval(usageRefreshTimer);
-    usageRefreshTimer = setInterval(fetchAndUpdateUsage, 5 * 60 * 1000);
+    usageRefreshTimer = setInterval(fetchAndUpdateUsage, 60 * 1000);
 }
 
 function updateVSCodeTitle(name) {
@@ -608,11 +599,12 @@ async function showMenu() {
         });
         child.stdout.on('data', d => { output += d.toString(); });
         child.on('close', () => {
+            // Reopen Chrome normally (without CDP) so user can continue browsing
+            openChrome(profileDir);
             try {
                 const result = JSON.parse(output.trim());
                 if (result.sessionKey) {
-                    lastUsage = null;
-                    fetchAndUpdateUsage();
+                    if (result.usage) updateStatusBar({ usage: result.usage });
                     vscode.window.showInformationMessage(`SessionKey capturat pentru "${activeAcc}"! Usage stats activ.`);
                 } else {
                     vscode.window.showWarningMessage(`Nu s-a capturat sessionKey: ${result.error || 'necunoscut'}`);
