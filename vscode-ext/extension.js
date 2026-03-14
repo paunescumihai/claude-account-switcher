@@ -17,52 +17,93 @@ const CHROME_EXE      = [
     'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'
 ].find(p => fs.existsSync(p));
 const CHROME_USER_DATA = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
+const BASE_DEBUG_PORT = 9222;
+
+// ── Port management per account ──────────────────────────────────────────────
+
+function getAccountPort(name) {
+    const portFile = path.join(ACCOUNTS_DIR, `${name}.port`);
+    try { return parseInt(fs.readFileSync(portFile, 'utf8').trim()); } catch { return null; }
+}
+
+function setAccountPort(name, port) {
+    fs.writeFileSync(path.join(ACCOUNTS_DIR, `${name}.port`), String(port), 'utf8');
+}
+
+function allocatePort(name) {
+    const existing = getAccountPort(name);
+    if (existing) return existing;
+    // Find next available port
+    const usedPorts = new Set();
+    try {
+        fs.readdirSync(ACCOUNTS_DIR).filter(f => f.endsWith('.port')).forEach(f => {
+            try { usedPorts.add(parseInt(fs.readFileSync(path.join(ACCOUNTS_DIR, f), 'utf8').trim())); } catch {}
+        });
+    } catch {}
+    let port = BASE_DEBUG_PORT;
+    while (usedPorts.has(port)) port++;
+    setAccountPort(name, port);
+    return port;
+}
+
+// ── Junction per account (Chrome needs different user-data-dir for CDP) ──────
+
+function getJunctionPath(name) {
+    return path.join(os.homedir(), 'AppData', 'Local', 'Google', `ChromeDebug_${name.replace(/[^a-zA-Z0-9]/g, '_')}`);
+}
+
+function ensureJunction(name) {
+    const jPath = getJunctionPath(name);
+    try { fs.lstatSync(jPath); return jPath; } catch {}
+    try {
+        require('child_process').execSync(`mklink /J "${jPath}" "${CHROME_USER_DATA}"`, { shell: 'cmd.exe', stdio: 'ignore' });
+    } catch {}
+    return jPath;
+}
+
+// ── Chrome profile helpers ───────────────────────────────────────────────────
 
 function createChromeProfile(profileName, email = '') {
-    // Gaseste urmatorul director disponibil (Profile 1, Profile 2, ...)
     let dirName = 'Profile 1';
     let n = 1;
     while (fs.existsSync(path.join(CHROME_USER_DATA, dirName))) {
         n++;
         dirName = `Profile ${n}`;
     }
-
-    // Creeaza directorul
     const profilePath = path.join(CHROME_USER_DATA, dirName);
     fs.mkdirSync(profilePath, { recursive: true });
-
-    // Creeaza Preferences cu numele profilului
     const prefs = {
-        profile: {
-            name: profileName,
-            is_using_default_name: false,
-            user_name: email
-        }
+        profile: { name: profileName, is_using_default_name: false, user_name: email }
     };
-    fs.writeFileSync(
-        path.join(profilePath, 'Preferences'),
-        JSON.stringify(prefs, null, 2),
-        'utf8'
-    );
-
-    // Actualizeaza Local State sa recunoasca profilul
+    fs.writeFileSync(path.join(profilePath, 'Preferences'), JSON.stringify(prefs, null, 2), 'utf8');
     try {
         const ls = JSON.parse(fs.readFileSync(LOCAL_STATE, 'utf8'));
         if (!ls.profile) ls.profile = {};
         if (!ls.profile.info_cache) ls.profile.info_cache = {};
         ls.profile.info_cache[dirName] = {
-            name: profileName,
-            is_using_default_name: false,
-            user_name: email,
-            active_time: Date.now() / 1000
+            name: profileName, is_using_default_name: false, user_name: email, active_time: Date.now() / 1000
         };
         fs.writeFileSync(LOCAL_STATE, JSON.stringify(ls), 'utf8');
     } catch {}
-
     return dirName;
 }
 
+function getChromeProfiles() {
+    try {
+        const data = JSON.parse(fs.readFileSync(LOCAL_STATE, 'utf8'));
+        const cache = data.profile.info_cache;
+        return Object.entries(cache).map(([dir, info]) => ({
+            dir, name: info.name || dir, email: info.user_name || ''
+        }));
+    } catch { return []; }
+}
+
+// ── Status bar ───────────────────────────────────────────────────────────────
+
 let statusBarItem;
+let lastUsage = null;
+let lastUsageTime = null;
+let usageRefreshTimer = null;
 
 function getActive() {
     try { return fs.readFileSync(ACTIVE_FILE, 'utf8').trim(); } catch { return null; }
@@ -75,22 +116,6 @@ function getAccounts() {
             .map(f => f.replace('.json', ''));
     } catch { return []; }
 }
-
-function getChromeProfiles() {
-    try {
-        const data = JSON.parse(fs.readFileSync(LOCAL_STATE, 'utf8'));
-        const cache = data.profile.info_cache;
-        return Object.entries(cache).map(([dir, info]) => ({
-            dir,
-            name: info.name || dir,
-            email: info.user_name || ''
-        }));
-    } catch { return []; }
-}
-
-let lastUsage = null;
-let lastUsageTime = null;
-let usageRefreshTimer = null;
 
 function formatUsage(u) {
     if (!u) return null;
@@ -136,55 +161,6 @@ function updateStatusBar(usageData) {
     statusBarItem.tooltip = buildTooltip(active, lastUsage);
 }
 
-function getSessionKey(accountName) {
-    // Try account-specific widget.json first
-    const accountWidget = path.join(ACCOUNTS_DIR, `${accountName}.widget.json`);
-    if (fs.existsSync(accountWidget)) {
-        try { return JSON.parse(fs.readFileSync(accountWidget, 'utf8')).sessionKey; } catch {}
-    }
-    // Fallback to global widget store
-    if (fs.existsSync(WIDGET_STORE)) {
-        try { return JSON.parse(fs.readFileSync(WIDGET_STORE, 'utf8')).sessionKey; } catch {}
-    }
-    return null;
-}
-
-function httpsGet(url, headers) {
-    return new Promise((resolve, reject) => {
-        const https = require('https');
-        const u = new URL(url);
-        https.get({ hostname: u.hostname, path: u.pathname + u.search, headers }, (res) => {
-            let body = '';
-            res.on('data', d => body += d);
-            res.on('end', () => {
-                try { resolve(JSON.parse(body)); }
-                catch { reject(new Error('bad json')); }
-            });
-        }).on('error', reject);
-    });
-}
-
-async function ensureSessionKey(accountName) {
-    return getSessionKey(accountName);
-}
-
-function fetchAndUpdateUsage() {
-    // Read cached usage from widget.json — no network requests (avoids UI freeze)
-    const active = getActive();
-    if (!active) return;
-    const widgetFile = path.join(ACCOUNTS_DIR, `${active}.widget.json`);
-    try {
-        const data = JSON.parse(fs.readFileSync(widgetFile, 'utf8'));
-        if (data.usage) updateStatusBar({ usage: data.usage });
-    } catch {}
-}
-
-function startUsageRefresh() {
-    fetchAndUpdateUsage();
-    if (usageRefreshTimer) clearInterval(usageRefreshTimer);
-    usageRefreshTimer = setInterval(fetchAndUpdateUsage, 60 * 1000);
-}
-
 function updateVSCodeTitle(name) {
     try {
         const s = JSON.parse(fs.readFileSync(VS_SETTINGS, 'utf8'));
@@ -193,165 +169,102 @@ function updateVSCodeTitle(name) {
     } catch {}
 }
 
-function openChrome(profileDir, withDebugPort = false) {
+// ── Chrome CDP helpers ───────────────────────────────────────────────────────
+
+function isPortListening(port) {
+    return new Promise((resolve) => {
+        const http = require('http');
+        http.get(`http://localhost:${port}/json/version`, { timeout: 2000 }, (res) => {
+            let body = '';
+            res.on('data', d => body += d);
+            res.on('end', () => resolve(true));
+        }).on('error', () => resolve(false));
+    });
+}
+
+function launchChromeWithDebug(accountName, profileDir, port) {
     if (!CHROME_EXE) return;
+    const jPath = ensureJunction(accountName);
     const { spawn } = require('child_process');
-    const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
     const args = [
-        `--user-data-dir=${userDataDir}`,
+        `--user-data-dir=${jPath}`,
         `--profile-directory=${profileDir}`,
-        '--new-window',
+        `--remote-debugging-port=${port}`,
+        '--remote-allow-origins=*',
+        '--no-first-run',
+        '--no-default-browser-check',
         'https://claude.ai'
     ];
-    if (withDebugPort) {
-        args.push('--remote-debugging-port=9222', '--remote-allow-origins=*');
-    }
     const child = spawn(CHROME_EXE, args, { stdio: 'ignore', shell: false });
     child.unref();
 }
 
-async function extractSessionKeyViaCDP(profileDir) {
-    if (!CHROME_EXE) return null;
-    const { spawn } = require('child_process');
-    const http = require('http');
-    const net = require('net');
-    const crypto = require('crypto');
-    const tmpDir = path.join(os.tmpdir(), `chrome-cdp-${Date.now()}`);
-
-    // Copy minimal profile structure to temp dir (non-default dir so CDP is allowed)
-    try {
-        fs.mkdirSync(path.join(tmpDir, profileDir), { recursive: true });
-        // Copy Local State (contains encryption key)
-        fs.copyFileSync(LOCAL_STATE, path.join(tmpDir, 'Local State'));
-        // Copy cookies
-        for (const sub of ['Network/Cookies', 'Cookies']) {
-            const src = path.join(CHROME_USER_DATA, profileDir, sub);
-            if (fs.existsSync(src)) {
-                const dst = path.join(tmpDir, profileDir, sub);
-                fs.mkdirSync(path.dirname(dst), { recursive: true });
-                fs.copyFileSync(src, dst);
-                break;
-            }
-        }
-        // Copy Preferences
-        const prefSrc = path.join(CHROME_USER_DATA, profileDir, 'Preferences');
-        if (fs.existsSync(prefSrc))
-            fs.copyFileSync(prefSrc, path.join(tmpDir, profileDir, 'Preferences'));
-    } catch (e) { return null; }
-
-    // Launch Chrome with temp dir + debug port (non-default dir allows CDP)
-    const child = spawn(CHROME_EXE, [
-        `--user-data-dir=${tmpDir}`,
-        `--profile-directory=${profileDir}`,
-        '--remote-debugging-port=9223',
-        '--remote-allow-origins=*',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--headless=new'
-    ], { stdio: 'ignore', shell: false });
-    child.unref();
-
-    // Wait for Chrome to start
-    await new Promise(resolve => setTimeout(resolve, 3000));
-
-    // Connect via CDP
-    const sessionKey = await new Promise((resolve) => {
-        const tryConnect = (attempt) => {
-            if (attempt > 5) { resolve(null); return; }
-            http.get('http://localhost:9223/json/version', { timeout: 2000 }, (res) => {
-                let body = '';
-                res.on('data', d => body += d);
-                res.on('end', () => {
-                    try {
-                        const info = JSON.parse(body);
-                        const wsUrl = new URL(info.webSocketDebuggerUrl.replace('9222', '9223'));
-                        const wsKey = crypto.randomBytes(16).toString('base64');
-                        const sock = net.connect(9223, '127.0.0.1');
-                        sock.setTimeout(5000);
-                        sock.on('timeout', () => { sock.destroy(); resolve(null); });
-                        sock.on('error', () => setTimeout(() => tryConnect(attempt + 1), 1000));
-                        let upgraded = false;
-                        let buf = Buffer.alloc(0);
-                        sock.on('connect', () => {
-                            sock.write(
-                                `GET ${wsUrl.pathname} HTTP/1.1\r\nHost: 127.0.0.1:9223\r\n` +
-                                `Upgrade: websocket\r\nConnection: Upgrade\r\n` +
-                                `Sec-WebSocket-Key: ${wsKey}\r\nSec-WebSocket-Version: 13\r\n\r\n`
-                            );
-                        });
-                        sock.on('data', (chunk) => {
-                            if (!upgraded) {
-                                if (chunk.toString().includes('101')) {
-                                    upgraded = true;
-                                    const idx = chunk.indexOf('\r\n\r\n');
-                                    buf = idx !== -1 ? chunk.slice(idx + 4) : Buffer.alloc(0);
-                                    const msg = Buffer.from(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
-                                    const frame = Buffer.alloc(msg.length + 2);
-                                    frame[0] = 0x81; frame[1] = msg.length; msg.copy(frame, 2);
-                                    sock.write(frame);
-                                }
-                                return;
-                            }
-                            buf = Buffer.concat([buf, chunk]);
-                            while (buf.length >= 2) {
-                                let len = buf[1] & 0x7f;
-                                let offset = 2;
-                                if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); offset = 4; }
-                                if (buf.length < offset + len) break;
-                                const payload = buf.slice(offset, offset + len).toString();
-                                buf = buf.slice(offset + len);
-                                try {
-                                    const m = JSON.parse(payload);
-                                    if (m.id === 1 && m.result && m.result.cookies) {
-                                        const sk = m.result.cookies.find(c => c.name === 'sessionKey' && c.domain.includes('claude.ai'));
-                                        sock.destroy();
-                                        resolve(sk ? sk.value : null);
-                                        return;
-                                    }
-                                } catch {}
-                            }
-                        });
-                    } catch { setTimeout(() => tryConnect(attempt + 1), 1000); }
-                });
-            }).on('error', () => setTimeout(() => tryConnect(attempt + 1), 1000));
-        };
-        tryConnect(0);
-    });
-
-    // Cleanup
-    try { child.kill(); } catch {}
-    try { exec(`taskkill /F /FI "WINDOWTITLE eq *chrome-cdp*"`, () => {}); } catch {}
-    setTimeout(() => {
-        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
-    }, 3000);
-
-    return sessionKey;
+async function ensureChromeDebug(accountName, profileDir, port) {
+    if (!CHROME_EXE) return false;
+    // Already running on this port?
+    if (await isPortListening(port)) return true;
+    // Launch Chrome with debug port (no kill - each account has its own junction+port)
+    launchChromeWithDebug(accountName, profileDir, port);
+    for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        if (await isPortListening(port)) return true;
+    }
+    return false;
 }
 
-function cdpGetSessionKey() {
+function openChrome(accountName, profileDir) {
+    if (!CHROME_EXE) return;
+    const port = allocatePort(accountName);
+    ensureChromeDebug(accountName, profileDir, port);
+}
+
+function cdpRefreshUsage(port) {
     return new Promise((resolve) => {
         const http = require('http');
         const net = require('net');
         const crypto = require('crypto');
 
-        http.get('http://localhost:9222/json/list', { timeout: 3000 }, (res) => {
+        http.get(`http://localhost:${port}/json/list`, { timeout: 3000 }, (res) => {
             let body = '';
             res.on('data', d => body += d);
             res.on('end', () => {
                 try {
                     const tabs = JSON.parse(body);
-                    const tab = tabs.find(t => t.webSocketDebuggerUrl);
-                    if (!tab) { resolve(null); return; }
+                    const claudeTab = tabs.find(t => t.url && t.url.includes('claude.ai') && t.webSocketDebuggerUrl);
+                    const anyTab = tabs.find(t => t.webSocketDebuggerUrl);
+                    const tab = claudeTab || anyTab;
+                    if (!tab) { resolve({ error: 'no claude.ai tab found' }); return; }
 
                     const wsUrl = new URL(tab.webSocketDebuggerUrl);
                     const wsKey = crypto.randomBytes(16).toString('base64');
-                    const sock = net.connect(parseInt(wsUrl.port) || 9222, wsUrl.hostname);
-                    sock.setTimeout(8000);
-                    sock.on('timeout', () => { sock.destroy(); resolve(null); });
-                    sock.on('error', () => resolve(null));
+                    const sock = net.connect(parseInt(wsUrl.port) || port, wsUrl.hostname);
+                    sock.setTimeout(15000);
+                    sock.on('timeout', () => { sock.destroy(); resolve({ error: 'timeout' }); });
+                    sock.on('error', (e) => resolve({ error: e.message }));
 
                     let upgraded = false;
                     let buf = Buffer.alloc(0);
+                    let sessionKey = null;
+                    const COOKIES_ID = 1, EVAL_ID = 2;
+
+                    function wsSend(data) {
+                        const msg = Buffer.from(JSON.stringify(data));
+                        const mask = crypto.randomBytes(4);
+                        let hdr;
+                        if (msg.length < 126) {
+                            hdr = Buffer.alloc(6);
+                            hdr[0] = 0x81; hdr[1] = 0x80 | msg.length;
+                            mask.copy(hdr, 2);
+                        } else {
+                            hdr = Buffer.alloc(8);
+                            hdr[0] = 0x81; hdr[1] = 0x80 | 126;
+                            hdr.writeUInt16BE(msg.length, 2);
+                            mask.copy(hdr, 4);
+                        }
+                        const masked = Buffer.alloc(msg.length);
+                        for (let i = 0; i < msg.length; i++) masked[i] = msg[i] ^ mask[i % 4];
+                        sock.write(Buffer.concat([hdr, masked]));
+                    }
 
                     sock.on('connect', () => {
                         sock.write(
@@ -368,11 +281,7 @@ function cdpGetSessionKey() {
                                 upgraded = true;
                                 const idx = str.indexOf('\r\n\r\n');
                                 buf = idx !== -1 ? chunk.slice(idx + 4) : Buffer.alloc(0);
-                                const msg = Buffer.from(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
-                                const frame = Buffer.alloc(msg.length + 2);
-                                frame[0] = 0x81; frame[1] = msg.length;
-                                msg.copy(frame, 2);
-                                sock.write(frame);
+                                wsSend({ id: COOKIES_ID, method: 'Network.getAllCookies' });
                             }
                             return;
                         }
@@ -381,29 +290,88 @@ function cdpGetSessionKey() {
                             let len = buf[1] & 0x7f;
                             let offset = 2;
                             if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); offset = 4; }
+                            else if (len === 127) { if (buf.length < 10) break; len = Number(buf.readBigUInt64BE(2)); offset = 10; }
                             if (buf.length < offset + len) break;
                             const payload = buf.slice(offset, offset + len).toString();
                             buf = buf.slice(offset + len);
                             try {
                                 const m = JSON.parse(payload);
-                                if (m.id === 1 && m.result && m.result.cookies) {
-                                    const sk = m.result.cookies.find(c => c.name === 'sessionKey' && c.domain.includes('claude.ai'));
+                                if (m.id === COOKIES_ID && m.result && m.result.cookies) {
+                                    const sk = m.result.cookies.find(c => c.name === 'sessionKey' && c.domain.includes('claude'));
+                                    sessionKey = sk ? sk.value : null;
+                                    if (claudeTab) {
+                                        const expr = `(async()=>{try{
+                                            const orgs=await fetch('/api/organizations',{credentials:'include'}).then(r=>r.json());
+                                            if(!Array.isArray(orgs)||!orgs[0])return JSON.stringify({error:'no orgs'});
+                                            let best=null,bestUtil=-1;
+                                            for(const org of orgs){
+                                                const id=org.uuid||org.id;
+                                                const u=await fetch('/api/organizations/'+id+'/usage',{credentials:'include'}).then(r=>r.json());
+                                                const util=(u.five_hour&&u.five_hour.utilization)||0;
+                                                if(util>bestUtil||(util===bestUtil&&!best)){bestUtil=util;best=u;}
+                                            }
+                                            return JSON.stringify(best||{});
+                                        }catch(e){return JSON.stringify({error:e.message});}})()`;
+                                        wsSend({ id: EVAL_ID, method: 'Runtime.evaluate', params: { expression: expr, awaitPromise: true, returnByValue: true, timeout: 15000 } });
+                                    } else {
+                                        sock.destroy();
+                                        resolve({ sessionKey, error: sessionKey ? null : 'no sessionKey' });
+                                    }
+                                }
+                                if (m.id === EVAL_ID) {
+                                    let usage = null;
+                                    try {
+                                        const val = m.result && m.result.result && m.result.result.value;
+                                        if (val) {
+                                            const parsed = typeof val === 'string' ? JSON.parse(val) : val;
+                                            if (parsed && !parsed.error) usage = parsed;
+                                        }
+                                    } catch {}
                                     sock.destroy();
-                                    resolve(sk ? sk.value : null);
-                                    return;
+                                    resolve({ sessionKey, usage });
                                 }
                             } catch {}
                         }
                     });
-                } catch { resolve(null); }
+                } catch { resolve({ error: 'parse error' }); }
             });
-        }).on('error', () => resolve(null));
+        }).on('error', () => resolve({ error: `Chrome nu ruleaza cu debug port ${port}` }));
     });
 }
 
+// ── Usage refresh ────────────────────────────────────────────────────────────
+
+function fetchAndUpdateUsage() {
+    const active = getActive();
+    if (!active) return;
+    const widgetFile = path.join(ACCOUNTS_DIR, `${active}.widget.json`);
+    try {
+        const data = JSON.parse(fs.readFileSync(widgetFile, 'utf8'));
+        if (data.usage) updateStatusBar({ usage: data.usage });
+    } catch {}
+}
+
+function startUsageRefresh() {
+    fetchAndUpdateUsage();
+    if (usageRefreshTimer) clearInterval(usageRefreshTimer);
+    usageRefreshTimer = setInterval(fetchAndUpdateUsage, 60 * 1000);
+}
+
+function getSessionKey(accountName) {
+    const accountWidget = path.join(ACCOUNTS_DIR, `${accountName}.widget.json`);
+    if (fs.existsSync(accountWidget)) {
+        try { return JSON.parse(fs.readFileSync(accountWidget, 'utf8')).sessionKey; } catch {}
+    }
+    if (fs.existsSync(WIDGET_STORE)) {
+        try { return JSON.parse(fs.readFileSync(WIDGET_STORE, 'utf8')).sessionKey; } catch {}
+    }
+    return null;
+}
+
+// ── Widget / session helpers ─────────────────────────────────────────────────
+
 const PYTHON_EXE     = path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'Python', 'Python313', 'python.exe');
 const GET_SESSION_PY = path.join(os.homedir(), 'claude-account-switcher', 'get-session-key.py');
-const GET_USAGE_PY   = path.join(os.homedir(), 'claude-account-switcher', 'get-usage.py');
 
 function restoreWidgetSession(name) {
     const profileFile = path.join(ACCOUNTS_DIR, `${name}.profile`);
@@ -431,6 +399,8 @@ function launchWidget() {
     });
 }
 
+// ── Add account ──────────────────────────────────────────────────────────────
+
 async function addAccount() {
     const name = await vscode.window.showInputBox({
         title: 'Adauga cont Claude',
@@ -447,11 +417,7 @@ async function addAccount() {
             const items = [
                 { label: '$(arrow-left) Inapoi la meniu', dir: '__back__' },
                 { label: '', kind: vscode.QuickPickItemKind.Separator },
-                ...profiles.map(p => ({
-                    label: p.name,
-                    description: p.email,
-                    dir: p.dir
-                })),
+                ...profiles.map(p => ({ label: p.name, description: p.email, dir: p.dir })),
                 { label: '', kind: vscode.QuickPickItemKind.Separator },
                 { label: '$(person-add) Adauga profil Chrome nou', dir: '__new__' },
                 { label: '$(refresh) Refresh profiluri Chrome', dir: '__refresh__' }
@@ -461,10 +427,7 @@ async function addAccount() {
                 ignoreFocusOut: true
             });
             if (!picked || picked.dir === '__back__') { showMenu(); return; }
-            if (picked.dir === '__refresh__') {
-                profiles = getChromeProfiles();
-                continue;
-            }
+            if (picked.dir === '__refresh__') { profiles = getChromeProfiles(); continue; }
             if (picked.dir === '__new__') {
                 const newName = await vscode.window.showInputBox({
                     title: 'Profil Chrome nou — Nume',
@@ -487,8 +450,11 @@ async function addAccount() {
         }
     }
 
+    // Allocate debug port for this account
+    const port = allocatePort(name);
+
     if (profileDir && CHROME_EXE) {
-        openChrome(profileDir);
+        openChrome(name, profileDir);
     } else if (CHROME_EXE) {
         exec(`"${CHROME_EXE}" https://claude.ai`);
     }
@@ -510,26 +476,32 @@ async function addAccount() {
         fs.writeFileSync(ACTIVE_FILE, name, 'utf8');
         updateVSCodeTitle(name);
         updateStatusBar();
-        vscode.window.showInformationMessage(`Cont "${name}" salvat!`);
+        vscode.window.showInformationMessage(`Cont "${name}" salvat! (debug port: ${port})`);
     } catch (e) {
         vscode.window.showErrorMessage(`Eroare: ${e.message}`);
     }
 }
+
+// ── Main menu ────────────────────────────────────────────────────────────────
 
 async function showMenu() {
     const accounts = getAccounts();
     const active = getActive();
 
     const items = [
-        ...accounts.map(name => ({
-            label: `$(account) ${name}`,
-            description: name === active ? '✓ activ' : '',
-            action: 'switch',
-            name
-        })),
+        ...accounts.map(name => {
+            const port = getAccountPort(name);
+            return {
+                label: `$(account) ${name}`,
+                description: (name === active ? '✓ activ' : '') + (port ? ` [port ${port}]` : ''),
+                action: 'switch',
+                name
+            };
+        }),
         { label: '', kind: vscode.QuickPickItemKind.Separator },
         { label: '$(add) Adauga cont nou', action: 'add' },
         { label: '$(trash) Sterge cont', action: 'delete' },
+        { label: '$(sync~spin) Refresh Usage', action: 'refresh-usage' },
         { label: '$(graph) Setup Usage Stats', action: 'usage-setup' }
     ];
 
@@ -562,7 +534,7 @@ async function showMenu() {
             { modal: true }, 'Sterge'
         );
         if (confirm !== 'Sterge') return;
-        for (const ext of ['.json', '.profile', '.widget.json']) {
+        for (const ext of ['.json', '.profile', '.widget.json', '.port']) {
             const f = path.join(ACCOUNTS_DIR, `${toDelete.name}${ext}`);
             try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch {}
         }
@@ -575,49 +547,84 @@ async function showMenu() {
         return;
     }
 
+    if (picked.action === 'refresh-usage') {
+        const activeAcc = getActive();
+        if (!activeAcc) { vscode.window.showWarningMessage('Nu exista cont activ.'); return; }
+        const profileFile = path.join(ACCOUNTS_DIR, `${activeAcc}.profile`);
+        const profileDir = fs.existsSync(profileFile) ? fs.readFileSync(profileFile, 'utf8').trim() : 'Default';
+        const port = allocatePort(activeAcc);
+
+        statusBarItem.text = `$(sync~spin) ${activeAcc} ...`;
+        try {
+            const ready = await ensureChromeDebug(activeAcc, profileDir, port);
+            if (!ready) { updateStatusBar(); vscode.window.showWarningMessage(`Nu s-a putut porni Chrome cu debug port ${port}.`); return; }
+            const result = await cdpRefreshUsage(port);
+            if (result.sessionKey) {
+                const widgetFile = path.join(ACCOUNTS_DIR, `${activeAcc}.widget.json`);
+                let existing = {};
+                try { existing = JSON.parse(fs.readFileSync(widgetFile, 'utf8')); } catch {}
+                existing.sessionKey = result.sessionKey;
+                if (result.usage) existing.usage = result.usage;
+                fs.writeFileSync(widgetFile, JSON.stringify(existing, null, 2), 'utf8');
+            }
+            if (result.usage) {
+                updateStatusBar({ usage: result.usage });
+                vscode.window.showInformationMessage(`Usage actualizat pentru "${activeAcc}"`);
+            } else if (result.error) {
+                updateStatusBar();
+                vscode.window.showWarningMessage(`Refresh usage: ${result.error}`);
+            } else {
+                updateStatusBar();
+                vscode.window.showWarningMessage('Nu s-a putut obtine usage.');
+            }
+        } catch (e) {
+            updateStatusBar();
+            vscode.window.showWarningMessage(`Eroare: ${e.message}`);
+        }
+        return;
+    }
+
     if (picked.action === 'usage-setup') {
         const activeAcc = getActive();
         if (!activeAcc) { vscode.window.showWarningMessage('Nu exista cont activ.'); return; }
         const profileFile = path.join(ACCOUNTS_DIR, `${activeAcc}.profile`);
         const profileDir = fs.existsSync(profileFile) ? fs.readFileSync(profileFile, 'utf8').trim() : 'Default';
+        const port = allocatePort(activeAcc);
 
-        const script = path.join(__dirname, 'get-session-cdp.js');
+        statusBarItem.text = `$(sync~spin) ${activeAcc} ...`;
+        const ready = await ensureChromeDebug(activeAcc, profileDir, port);
+        if (!ready) { updateStatusBar(); vscode.window.showWarningMessage(`Nu s-a putut porni Chrome cu debug port ${port}.`); return; }
 
-        vscode.window.showInformationMessage(
-            `Chrome se deschide. Logheaza-te pe claude.ai cu contul "${activeAcc}" — sessionKey se captureaza automat.`
-        );
+        await new Promise(r => setTimeout(r, 3000));
 
-        const { spawn } = require('child_process');
-        let output = '';
-        const child = spawn('node', [script, profileDir, activeAcc], {
-            stdio: ['ignore', 'pipe', 'ignore'],
-            shell: false
-        });
-        child.stdout.on('data', d => { output += d.toString(); });
-        child.on('close', () => {
-            // Reopen Chrome normally (without CDP) so user can continue browsing
-            openChrome(profileDir);
-            try {
-                const result = JSON.parse(output.trim());
-                if (result.sessionKey) {
-                    if (result.usage) updateStatusBar({ usage: result.usage });
-                    vscode.window.showInformationMessage(`SessionKey capturat pentru "${activeAcc}"! Usage stats activ.`);
-                } else {
-                    vscode.window.showWarningMessage(`Nu s-a capturat sessionKey: ${result.error || 'necunoscut'}`);
-                }
-            } catch {
-                vscode.window.showWarningMessage('Eroare la capturarea sessionKey.');
+        try {
+            const result = await cdpRefreshUsage(port);
+            if (result.sessionKey) {
+                const widgetFile = path.join(ACCOUNTS_DIR, `${activeAcc}.widget.json`);
+                let existing = {};
+                try { existing = JSON.parse(fs.readFileSync(widgetFile, 'utf8')); } catch {}
+                existing.sessionKey = result.sessionKey;
+                if (result.usage) existing.usage = result.usage;
+                fs.writeFileSync(widgetFile, JSON.stringify(existing, null, 2), 'utf8');
+                if (result.usage) updateStatusBar({ usage: result.usage });
+                vscode.window.showInformationMessage(`SessionKey capturat pentru "${activeAcc}"! (port ${port})`);
+            } else {
+                updateStatusBar();
+                vscode.window.showWarningMessage(`Nu s-a capturat sessionKey: ${result.error || 'necunoscut'}`);
             }
-        });
+        } catch (e) {
+            updateStatusBar();
+            vscode.window.showWarningMessage(`Eroare: ${e.message}`);
+        }
         return;
     }
 
+    // ── Switch account ───────────────────────────────────────────────────────
     if (!picked.name || picked.name === active) return;
 
     const REFRESH_PY = path.join(os.homedir(), 'claude-account-switcher', 'refresh-token.py');
     const src = path.join(ACCOUNTS_DIR, `${picked.name}.json`);
     try {
-        // Refresh token inainte de switch
         if (fs.existsSync(PYTHON_EXE) && fs.existsSync(REFRESH_PY)) {
             const { execSync } = require('child_process');
             try { execSync(`"${PYTHON_EXE}" "${REFRESH_PY}" "${src}"`, { timeout: 15000 }); } catch {}
@@ -631,18 +638,19 @@ async function showMenu() {
 
         const profileFile = path.join(ACCOUNTS_DIR, `${picked.name}.profile`);
         if (fs.existsSync(profileFile)) {
-            openChrome(fs.readFileSync(profileFile, 'utf8').trim());
+            openChrome(picked.name, fs.readFileSync(profileFile, 'utf8').trim());
         }
 
         vscode.window.showInformationMessage(`Switched la: ${picked.name}`);
         lastUsage = null;
         updateStatusBar();
-        // Wait for Chrome to load, then try CDP to get sessionKey automatically
         setTimeout(fetchAndUpdateUsage, 5000);
     } catch (e) {
         vscode.window.showErrorMessage(`Eroare la switch: ${e.message}`);
     }
 }
+
+// ── Activation ───────────────────────────────────────────────────────────────
 
 function activate(context) {
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 1000);
