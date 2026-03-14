@@ -163,18 +163,7 @@ function httpsGet(url, headers) {
 }
 
 async function ensureSessionKey(accountName) {
-    let key = getSessionKey(accountName);
-    if (key) return key;
-    // Try CDP (works when Chrome started with --remote-debugging-port=9222)
-    key = await cdpGetSessionKey();
-    if (key) {
-        const widgetFile = path.join(ACCOUNTS_DIR, `${accountName}.widget.json`);
-        let existing = {};
-        try { existing = JSON.parse(fs.readFileSync(widgetFile, 'utf8')); } catch {}
-        existing.sessionKey = key;
-        try { fs.writeFileSync(widgetFile, JSON.stringify(existing, null, 2), 'utf8'); } catch {}
-    }
-    return key;
+    return getSessionKey(accountName);
 }
 
 async function fetchAndUpdateUsage() {
@@ -213,10 +202,139 @@ function updateVSCodeTitle(name) {
     } catch {}
 }
 
-function openChrome(profileDir) {
+function openChrome(profileDir, withDebugPort = false) {
     if (!CHROME_EXE) return;
+    const { spawn } = require('child_process');
     const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
-    exec(`"${CHROME_EXE}" --user-data-dir="${userDataDir}" --profile-directory="${profileDir}" --remote-debugging-port=9222 --remote-allow-origins=* --new-window https://claude.ai`);
+    const args = [
+        `--user-data-dir=${userDataDir}`,
+        `--profile-directory=${profileDir}`,
+        '--new-window',
+        'https://claude.ai'
+    ];
+    if (withDebugPort) {
+        args.push('--remote-debugging-port=9222', '--remote-allow-origins=*');
+    }
+    const child = spawn(CHROME_EXE, args, { stdio: 'ignore', shell: false });
+    child.unref();
+}
+
+async function extractSessionKeyViaCDP(profileDir) {
+    if (!CHROME_EXE) return null;
+    const { spawn } = require('child_process');
+    const http = require('http');
+    const net = require('net');
+    const crypto = require('crypto');
+    const tmpDir = path.join(os.tmpdir(), `chrome-cdp-${Date.now()}`);
+
+    // Copy minimal profile structure to temp dir (non-default dir so CDP is allowed)
+    try {
+        fs.mkdirSync(path.join(tmpDir, profileDir), { recursive: true });
+        // Copy Local State (contains encryption key)
+        fs.copyFileSync(LOCAL_STATE, path.join(tmpDir, 'Local State'));
+        // Copy cookies
+        for (const sub of ['Network/Cookies', 'Cookies']) {
+            const src = path.join(CHROME_USER_DATA, profileDir, sub);
+            if (fs.existsSync(src)) {
+                const dst = path.join(tmpDir, profileDir, sub);
+                fs.mkdirSync(path.dirname(dst), { recursive: true });
+                fs.copyFileSync(src, dst);
+                break;
+            }
+        }
+        // Copy Preferences
+        const prefSrc = path.join(CHROME_USER_DATA, profileDir, 'Preferences');
+        if (fs.existsSync(prefSrc))
+            fs.copyFileSync(prefSrc, path.join(tmpDir, profileDir, 'Preferences'));
+    } catch (e) { return null; }
+
+    // Launch Chrome with temp dir + debug port (non-default dir allows CDP)
+    const child = spawn(CHROME_EXE, [
+        `--user-data-dir=${tmpDir}`,
+        `--profile-directory=${profileDir}`,
+        '--remote-debugging-port=9223',
+        '--remote-allow-origins=*',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--headless=new'
+    ], { stdio: 'ignore', shell: false });
+    child.unref();
+
+    // Wait for Chrome to start
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    // Connect via CDP
+    const sessionKey = await new Promise((resolve) => {
+        const tryConnect = (attempt) => {
+            if (attempt > 5) { resolve(null); return; }
+            http.get('http://localhost:9223/json/version', { timeout: 2000 }, (res) => {
+                let body = '';
+                res.on('data', d => body += d);
+                res.on('end', () => {
+                    try {
+                        const info = JSON.parse(body);
+                        const wsUrl = new URL(info.webSocketDebuggerUrl.replace('9222', '9223'));
+                        const wsKey = crypto.randomBytes(16).toString('base64');
+                        const sock = net.connect(9223, '127.0.0.1');
+                        sock.setTimeout(5000);
+                        sock.on('timeout', () => { sock.destroy(); resolve(null); });
+                        sock.on('error', () => setTimeout(() => tryConnect(attempt + 1), 1000));
+                        let upgraded = false;
+                        let buf = Buffer.alloc(0);
+                        sock.on('connect', () => {
+                            sock.write(
+                                `GET ${wsUrl.pathname} HTTP/1.1\r\nHost: 127.0.0.1:9223\r\n` +
+                                `Upgrade: websocket\r\nConnection: Upgrade\r\n` +
+                                `Sec-WebSocket-Key: ${wsKey}\r\nSec-WebSocket-Version: 13\r\n\r\n`
+                            );
+                        });
+                        sock.on('data', (chunk) => {
+                            if (!upgraded) {
+                                if (chunk.toString().includes('101')) {
+                                    upgraded = true;
+                                    const idx = chunk.indexOf('\r\n\r\n');
+                                    buf = idx !== -1 ? chunk.slice(idx + 4) : Buffer.alloc(0);
+                                    const msg = Buffer.from(JSON.stringify({ id: 1, method: 'Network.getAllCookies' }));
+                                    const frame = Buffer.alloc(msg.length + 2);
+                                    frame[0] = 0x81; frame[1] = msg.length; msg.copy(frame, 2);
+                                    sock.write(frame);
+                                }
+                                return;
+                            }
+                            buf = Buffer.concat([buf, chunk]);
+                            while (buf.length >= 2) {
+                                let len = buf[1] & 0x7f;
+                                let offset = 2;
+                                if (len === 126) { if (buf.length < 4) break; len = buf.readUInt16BE(2); offset = 4; }
+                                if (buf.length < offset + len) break;
+                                const payload = buf.slice(offset, offset + len).toString();
+                                buf = buf.slice(offset + len);
+                                try {
+                                    const m = JSON.parse(payload);
+                                    if (m.id === 1 && m.result && m.result.cookies) {
+                                        const sk = m.result.cookies.find(c => c.name === 'sessionKey' && c.domain.includes('claude.ai'));
+                                        sock.destroy();
+                                        resolve(sk ? sk.value : null);
+                                        return;
+                                    }
+                                } catch {}
+                            }
+                        });
+                    } catch { setTimeout(() => tryConnect(attempt + 1), 1000); }
+                });
+            }).on('error', () => setTimeout(() => tryConnect(attempt + 1), 1000));
+        };
+        tryConnect(0);
+    });
+
+    // Cleanup
+    try { child.kill(); } catch {}
+    try { exec(`taskkill /F /FI "WINDOWTITLE eq *chrome-cdp*"`, () => {}); } catch {}
+    setTimeout(() => {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+    }, 3000);
+
+    return sessionKey;
 }
 
 function cdpGetSessionKey() {
@@ -470,29 +588,39 @@ async function showMenu() {
         const activeAcc = getActive();
         if (!activeAcc) { vscode.window.showWarningMessage('Nu exista cont activ.'); return; }
         const profileFile = path.join(ACCOUNTS_DIR, `${activeAcc}.profile`);
-        const profileDir = fs.existsSync(profileFile) ? fs.readFileSync(profileFile, 'utf8').trim() : null;
+        const profileDir = fs.existsSync(profileFile) ? fs.readFileSync(profileFile, 'utf8').trim() : 'Default';
 
-        vscode.window.showInformationMessage(`Se inchide Chrome si se redeschide cu debug port pentru "${activeAcc}"...`);
-
-        // Kill Chrome first so --remote-debugging-port is respected
-        await new Promise(resolve => exec('taskkill /IM chrome.exe /F', () => resolve()));
-        await new Promise(resolve => setTimeout(resolve, 1500));
-
-        const userDataDir = path.join(os.homedir(), 'AppData', 'Local', 'Google', 'Chrome', 'User Data');
-        if (CHROME_EXE && profileDir) {
-            exec(`"${CHROME_EXE}" --user-data-dir="${userDataDir}" --profile-directory="${profileDir}" --remote-debugging-port=9222 --remote-allow-origins=* https://claude.ai`);
+        const script = path.join(os.homedir(), 'claude-account-switcher', 'get-session-cdp.js');
+        if (!fs.existsSync(script)) {
+            vscode.window.showErrorMessage('Fisier get-session-cdp.js nu a fost gasit.');
+            return;
         }
 
-        vscode.window.showInformationMessage(`Chrome pornit. Se extrage sessionKey (asteapta 8s)...`);
-        setTimeout(async () => {
-            lastUsage = null;
-            await fetchAndUpdateUsage();
-            if (getSessionKey(activeAcc)) {
-                vscode.window.showInformationMessage(`Usage stats activ pentru "${activeAcc}"!`);
-            } else {
-                vscode.window.showWarningMessage(`Nu s-a putut obtine sessionKey. Incearca din nou.`);
+        vscode.window.showInformationMessage(
+            `Chrome se deschide. Logheaza-te pe claude.ai cu contul "${activeAcc}" — sessionKey se captureaza automat.`
+        );
+
+        const { spawn } = require('child_process');
+        let output = '';
+        const child = spawn('node', [script, profileDir, activeAcc], {
+            stdio: ['ignore', 'pipe', 'ignore'],
+            shell: false
+        });
+        child.stdout.on('data', d => { output += d.toString(); });
+        child.on('close', () => {
+            try {
+                const result = JSON.parse(output.trim());
+                if (result.sessionKey) {
+                    lastUsage = null;
+                    fetchAndUpdateUsage();
+                    vscode.window.showInformationMessage(`SessionKey capturat pentru "${activeAcc}"! Usage stats activ.`);
+                } else {
+                    vscode.window.showWarningMessage(`Nu s-a capturat sessionKey: ${result.error || 'necunoscut'}`);
+                }
+            } catch {
+                vscode.window.showWarningMessage('Eroare la capturarea sessionKey.');
             }
-        }, 8000);
+        });
         return;
     }
 
