@@ -581,11 +581,7 @@ async function showMenu() {
         const profileFile = path.join(ACCOUNTS_DIR, `${activeAcc}.profile`);
         const profileDir = fs.existsSync(profileFile) ? fs.readFileSync(profileFile, 'utf8').trim() : 'Default';
 
-        const script = path.join(os.homedir(), 'claude-account-switcher', 'get-session-cdp.js');
-        if (!fs.existsSync(script)) {
-            vscode.window.showErrorMessage('Fisier get-session-cdp.js nu a fost gasit.');
-            return;
-        }
+        const script = path.join(__dirname, 'get-session-cdp.js');
 
         vscode.window.showInformationMessage(
             `Chrome se deschide. Logheaza-te pe claude.ai cu contul "${activeAcc}" — sessionKey se captureaza automat.`
